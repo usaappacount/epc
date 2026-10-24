@@ -1,6 +1,6 @@
 FROM php:8.3-apache
 
-# 1. تثبيت متطلبات النظام وإضافة nodejs و npm لبناء ملفات التصميم (Vite)
+# 1. تثبيت متطلبات النظام وإضافة nodejs و npm
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -21,20 +21,19 @@ RUN docker-php-ext-install pdo_sqlite mbstring exif pcntl bcmath gd zip
 # 3. جلب أداة Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# 4. تحديد مسار العمل ونسخ ملفات المشروع
+# 4. تحديد مسار العمل ونسخ ملفات المشروع (بما فيها قاعدة بياناتك المرفوعة)
 WORKDIR /var/www/html
 COPY . /var/www/html
 
-# 5. تحويل ملف .env.example إلى .env الحقيقي وتجهيز قاعدة البيانات
+# 5. تحويل ملف .env.example إلى .env الحقيقي
 RUN rm -f .env bootstrap/cache/*.php && \
-    cp .env.example .env && \
-    touch database/database.sqlite
+    cp .env.example .env
 
 # 6. تثبيت حزم لارافيل وتوليد المفتاح
 RUN composer install --no-dev --optimize-autoloader
 RUN php artisan key:generate --force
 
-# 7. تثبيت وبناء ملفات الواجهة والتصميم (Vite) لحل مشكلة manifest.json
+# 7. بناء ملفات التصميم (Vite)
 RUN npm install && npm run build
 
 # 8. ضبط إعدادات Apache ليقرأ من مجلد public
@@ -49,5 +48,5 @@ RUN chmod -R 775 storage bootstrap/cache database
 
 EXPOSE 80
 
-# 10. مسح الكاش وتشغيل الجداول والسيرفر
+# 10. تشغيل السيرفر (تحديث الجداول دون مسح البيانات الموجودة)
 CMD php artisan config:clear && php artisan migrate --force && apache2-foreground
