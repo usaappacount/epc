@@ -5,6 +5,19 @@
 @section('content')
 <div class="space-y-6">
 
+    <!-- رسائل النجاح أو الخطأ -->
+    @if(session('success'))
+        <div class="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl font-bold text-sm shadow-sm">
+            ✅ {{ session('success') }}
+        </div>
+    @endif
+
+    @if($errors->any())
+        <div class="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl font-bold text-sm shadow-sm">
+            ❌ يرجى التأكد من اختيار ملف قاعدة بيانات صالح (.sqlite).
+        </div>
+    @endif
+
     <!-- كرت إعدادات الـ Webhook -->
     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
         <h2 class="text-2xl font-bold text-slate-800">
@@ -33,16 +46,30 @@
         </div>
     </div>
 
-    <!-- كرت النسخة الاحتياطية -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center">
+    <!-- كرت النسخة الاحتياطية واستعادة البيانات -->
+    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-wrap justify-between items-center gap-4">
         <div>
             <h3 class="font-bold text-slate-800">💾 النسخ الاحتياطي لقاعدة البيانات</h3>
-            <p class="text-xs text-slate-500 mt-1">تحميل نسخة احتياطية من الأصناف والسجلات إلى جهازك بصيغة SQLite.</p>
+            <p class="text-xs text-slate-500 mt-1">تحميل نسخة احتياطية من الأصناف والسجلات إلى جهازك بصيغة SQLite أو استعادة نسخة سابقة.</p>
         </div>
-        <a href="{{ route('backup.download') }}" 
-           class="bg-slate-800 hover:bg-slate-900 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition">
-            تحميل النسخة الاحتياطية
-        </a>
+
+        <div class="flex items-center gap-3">
+            <!-- زر تحميل النسخة الاحتياطية -->
+            <a href="{{ route('backup.download') }}" 
+               class="bg-slate-800 hover:bg-slate-900 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition shadow-sm inline-flex items-center gap-2">
+                <span>⬇️</span> تحميل النسخة
+            </a>
+
+            <!-- زر استعادة النسخة الاحتياطية الجديد -->
+            <form action="{{ route('backup.restore') }}" method="POST" enctype="multipart/form-data" class="inline-block">
+                @csrf
+                <label class="cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition shadow-sm inline-flex items-center gap-2">
+                    <span>⬆️</span> استعادة النسخة
+                    <input type="file" name="backup_file" accept=".sqlite,.db" class="hidden" 
+                           onchange="if(confirm('هل أنت متأكد من استبدال قاعدة البيانات الحالية بالملف المختار؟ سيتم تحديث جميع بيانات النظام فوراً.')) { this.form.submit(); } else { this.value = ''; }">
+                </label>
+            </form>
+        </div>
     </div>
 
     <!-- كرت سجلات الـ Webhook -->
