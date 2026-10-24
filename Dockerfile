@@ -1,6 +1,6 @@
 FROM php:8.3-apache
 
-# 1. تثبيت متطلبات النظام وإضافة nodejs و npm
+# 1. تثبيت متطلبات النظام وإضافة nodejs و npm لبناء ملفات الواجهة
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -25,13 +25,13 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 COPY . /var/www/html
 
-# 5. تجهيز ملف .env وملف قاعدة البيانات والصلاحيات بحرية كاملة
+# 5. تجهيز ملف .env وإنشاء مجلدات الكاش وملف قاعدة البيانات
 RUN rm -f .env bootstrap/cache/*.php && \
     cp .env.example .env && \
     mkdir -p database storage/framework/sessions storage/framework/views storage/framework/cache && \
     touch database/database.sqlite
 
-# 6. تثبيت حزم لارافيل وتوليد المفتاح
+# 6. تثبيت حزم لارافيل وتوليد مفتاح التشفير
 RUN composer install --no-dev --optimize-autoloader
 RUN php artisan key:generate --force
 
@@ -44,12 +44,4 @@ RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-av
 RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
 RUN a2enmod rewrite
 
-# 9. **(مهم جداً)** منح صلاحيات القراءة والكتابة الكاملة للملفات وقاعدة البيانات
-RUN chown -R www-data:www-data /var/www/html && \
-    chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database && \
-    chmod 666 /var/www/html/database/database.sqlite
-
-EXPOSE 80
-
-# 10. تشغيل السيرفر وتطبيق الجداول
-CMD php artisan config:clear && php artisan migrate --force && apache2-foreground
+# 9. منح صلاحيات القراءة والكتابة الكاملة للمجلدات وقاعدة البيانات
