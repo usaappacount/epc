@@ -25,10 +25,15 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 COPY . /var/www/html
 
-# 5. تجهيز ملف .env وإنشاء مجلدات الكاش وملف قاعدة البيانات
+# 5. تجهيز ملف .env وإنشاء كافة مجلدات التخزين والكاش وملف قاعدة البيانات
 RUN rm -f .env bootstrap/cache/*.php && \
     cp .env.example .env && \
-    mkdir -p database storage/framework/sessions storage/framework/views storage/framework/cache && \
+    mkdir -p database \
+             storage/framework/sessions \
+             storage/framework/views \
+             storage/framework/cache/data \
+             storage/logs \
+             bootstrap/cache && \
     touch database/database.sqlite
 
 # 6. تثبيت حزم لارافيل وتوليد مفتاح التشفير
@@ -44,4 +49,15 @@ RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-av
 RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
 RUN a2enmod rewrite
 
-# 9. منح صلاحيات القراءة والكتابة الكاملة للمجلدات وقاعدة البيانات
+# 9. منح الصلاحيات المبدئية
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 777 /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database
+
+EXPOSE 80
+
+# 10. مسح الكاش، بناء الجداول، ثم تأكيد صلاحيات الكتابة قبل تشغيل السيرفر مباشرة
+CMD php artisan optimize:clear && \
+    php artisan migrate:fresh --seed --force && \
+    chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database && \
+    chmod -R 777 /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database && \
+    apache2-foreground
