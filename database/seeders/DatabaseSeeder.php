@@ -1,25 +1,38 @@
-<?php
+<?php namespace Database\Seeders;
 
-namespace Database\Seeders;
-
-use Illuminate\Database\Seeder;
+use App\Models\Item;
 use App\Models\User;
+use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
 
 class DatabaseSeeder extends Seeder
 {
-    /**
-     * Seed the application's database.
-     */
     public function run(): void
     {
-        // إنشاء أو تحديث حساب الأدمن تلقائياً دون التأثير على باقي البيانات
         User::updateOrCreate(
-            ['phone' => '0556666037'], // ضع رقم جوال الأدمن هنا
+            ['username' => 'admin'],
             [
-                'name' => 'Admin',
-                'password' => Hash::make('112233'), // ضع كلمة المرور هنا
+                'name' => 'مدير النظام',
+                'email' => 'admin@example.com',
+                'phone' => '+966556666037', // في شاشة الدخول ستكتبه 0500000000
+                'role' => 'admin',
+                'password' => Hash::make('123123'),
             ]
         );
+
+        $items = [
+            ['item_number' => 'ITM-1001', 'item_name' => 'شاشة عرض مكتبية 27 بوصة', 'quantity' => 15, 'price' => 850.00],
+            ['item_number' => 'ITM-1002', 'item_name' => 'لوحة مفاتيح ميكانيكية لاسلكية', 'quantity' => 42, 'price' => 220.50],
+            ['item_number' => 'ITM-1003', 'item_name' => 'فأرة ضوئية احترافية', 'quantity' => 60, 'price' => 115.00],
+            ['item_number' => 'ITM-1004', 'item_name' => 'وحدة تخزين خارجية SSD 1TB', 'quantity' => 8, 'price' => 430.00],
+            ['item_number' => 'ITM-1005', 'item_name' => 'سماعة رأس عازلة للضوضاء', 'quantity' => 25, 'price' => 540.00],
+        ];
+
+        foreach ($items as $item) {
+            Item::updateOrCreate(
+                ['item_number' => $item['item_number']],
+                $item
+            );
+        }
     }
 }
