@@ -6,6 +6,8 @@ use App\Models\Item;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\View;
+use Illuminate\Support\Facades\File;
 
 Route::get('/', function () {
     return redirect()->route('inventory.index');
@@ -18,14 +20,11 @@ Route::get('/dashboard', function () {
 // دالة موحدة لمعالجة طلبات الـ Webhook لمنع تكرار الكود
 function handleWebhook(Request $request) {
     // 1. التحقق من التوقيع الأمني (إذا تم تفعيل المفتاح السري في .env)
-    $signature = $request->header('x-webhook-signature');
-    $webhookSecret = env('GREATWHATS_WEBHOOK_SECRET');
+    $signature = $request->header('x-webhook-signature');$webhookSecret = env('GREATWHATS_WEBHOOK_SECRET');
 
-    if (!empty($webhookSecret)) {
-        $rawBody = $request->getContent();
-        $expectedSignature = 'sha256=' . hash_hmac('sha256', $rawBody, $webhookSecret);
+    if (!empty($webhookSecret)) {$rawBody = $request->getContent();$expectedSignature = 'sha256=' . hash_hmac('sha256', $rawBody,$webhookSecret);
 
-        if (!$signature || !hash_equals($expectedSignature, $signature)) {
+        if (!$signature || !hash_equals($expectedSignature,$signature)) {
             return response()->json([
                 'status'  => 'error',
                 'message' => 'Invalid signature - التوقيع غير صالح'
@@ -69,17 +68,14 @@ Route::middleware('auth')->group(function () {
 
     // مسار صفحة الذكاء الاصطناعي والواتساب (الصفحة الثانية)
     Route::get('/ai-whatsapp', function (Request $request) {
-        $customerMessage = (string) $request->query('message', '');
-        $matchedItems = collect();
-        $aiReply = null;
+        $customerMessage = (string)$request->query('message', '');
+        $matchedItems = collect();$aiReply = null;
 
         if (trim($customerMessage) !== '') {
             $matchedItems = Item::smartSearch($customerMessage)->take(5)->get();
-            if ($matchedItems->isNotEmpty()) {
-                $lines = ["مرحباً بك! إليك الأصناف المتوفرة حسب طلبك:\n"];
-                foreach ($matchedItems as $item) {
-                    $status = $item->quantity > 0 ? "متوفر ({$item->quantity})" : "غير متوفر";
-                    $lines[] = "🔹 *{$item->item_name}* | السعر: {$item->price} ر.س | الحالة: {$status}";
+            if ($matchedItems->isNotEmpty()) {$lines = ["مرحباً بك! إليك الأصناف المتوفرة حسب طلبك:\n"];
+                foreach ($matchedItems as $item) {$status = $item->quantity > 0 ? "متوفر ({$item->quantity})" : "غير متوفر";
+                    $lines[] = "🔹 *{$item->item_name}* | السعر: {$item->price} ر.س \vert{} الحالة: {$status}";
                 }
                 $aiReply = implode("\n\n", $lines);
             } else {
@@ -99,16 +95,42 @@ Route::middleware('auth')->group(function () {
         ]);
     })->name('pages.second');
 
-    // صفحة إعدادات ربط الـ API والـ Webhook (الصفحة الثالثة - موجهة لملف third.blade.php مباشرة)
+    // صفحة إعدادات ربط الـ API والـ Webhook (الصفحة الثالثة - بحث ذكي تلقائي عن الملف)
     Route::get('/page-third', function () {
         $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
-        return view('third', compact('webhookLogs'));
+
+        // فحص جميع المسارات والأسماء المحتملة للملف تلقائياً
+        foreach (['third', 'pages.third', 'Third', 'pages.Third', 'page-third', 'pages.page-third'] as $viewName) {
+            if (View::exists($viewName)) {
+                return view($viewName, compact('webhookLogs'));
+            }
+        }
+
+        // إذا لم يجده، يبحث عن أي ملف يحتوي اسمه على كلمة third داخل مجلد views ويفتحه
+        $allFiles = File::allFiles(resource_path('views'));
+        foreach ($allFiles as$file) {
+            $relativePath =$file->getRelativePathname();
+            if (stripos($relativePath, 'third') !== false && str_ends_with($relativePath, '.blade.php')) {
+                $detectedView = str_replace(['/', '\\', '.blade.php'], ['.', '.', ''],$relativePath);
+                return view($detectedView, compact('webhookLogs'));
+            }
+        }
+
+        // إذا لم يكن مرفوعاً على السيرفر أصلاً، يعرض لك قائمة بالملفات الموجودة لمعرفة السبب
+        $fileList = collect($allFiles)->map(fn($f) =>$f->getRelativePathname())->implode('<br>');
+        return response("<h3>لم يتم العثور على ملف third.blade.php على السيرفر!</h3><p>الملفات الموجودة حالياً داخل resources/views هي:</p><pre>{$fileList}</pre>");
     })->name('pages.third');
+
+    // مسار تحميل النسخة الاحتياطية لقاعدة البيانات
+    Route::get('/download-backup', function () {
+        $path = database_path('database.sqlite');
+        if (!file_exists($path)) {
+            return back()->with('error', 'ملف قاعدة البيانات غير موجود.');
+        }
+        return response()->download($path, 'database_backup_' . date('Y-m-d_H-i-s') . '.sqlite');
+    })->name('backup.download');
 
     // مسارات الملف الشخصي
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
-    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
-});
-
-require __DIR__.'/auth.php';
+    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.
