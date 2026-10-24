@@ -1,6 +1,6 @@
 FROM php:8.3-apache
 
-# تثبيت متطلبات النظام وإضافة nodejs و npm
+# 1. تثبيت متطلبات النظام وإضافة nodejs و npm
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -15,39 +15,41 @@ RUN apt-get update && apt-get install -y \
     npm \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# تثبيت إضافات PHP الضرورية
+# 2. تثبيت إضافات PHP الضرورية
 RUN docker-php-ext-install pdo_sqlite mbstring exif pcntl bcmath gd zip
 
-# جلب أداة Composer
+# 3. جلب أداة Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# تحديد مسار العمل ونسخ ملفات المشروع
+# 4. تحديد مسار العمل ونسخ ملفات المشروع
 WORKDIR /var/www/html
 COPY . /var/www/html
 
-# تحويل ملف .env.example إلى .env الحقيقي
+# 5. تجهيز ملف .env وملف قاعدة البيانات والصلاحيات بحرية كاملة
 RUN rm -f .env bootstrap/cache/*.php && \
-    cp .env.example .env
+    cp .env.example .env && \
+    mkdir -p database storage/framework/sessions storage/framework/views storage/framework/cache && \
+    touch database/database.sqlite
 
-# تثبيت حزم لارافيل وتوليد المفتاح
+# 6. تثبيت حزم لارافيل وتوليد المفتاح
 RUN composer install --no-dev --optimize-autoloader
 RUN php artisan key:generate --force
 
-# بناء ملفات التصميم (Vite)
+# 7. بناء ملفات التصميم (Vite)
 RUN npm install && npm run build
 
-# ضبط إعدادات Apache ليقرأ من مجلد public
+# 8. ضبط إعدادات Apache ليقرأ من مجلد public
 ENV APACHE_DOCUMENT_ROOT /var/www/html/public
 RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf
 RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
 RUN a2enmod rewrite
 
-# إعطاء صلاحيات القراءة والكتابة للمجلدات وقاعدة البيانات
-RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database
-RUN chmod -R 775 storage bootstrap/cache database
-CMD php artisan config:clear && php artisan migrate --force && php artisan db:seed --force && apache2-foreground
+# 9. **(مهم جداً)** منح صلاحيات القراءة والكتابة الكاملة للملفات وقاعدة البيانات
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database && \
+    chmod 666 /var/www/html/database/database.sqlite
 
 EXPOSE 80
 
-# مسح الكاش وتشغيل الجداول والسيرفر
+# 10. تشغيل السيرفر وتطبيق الجداول
 CMD php artisan config:clear && php artisan migrate --force && apache2-foreground
