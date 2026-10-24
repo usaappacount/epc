@@ -55,8 +55,9 @@ RUN chown -R www-data:www-data /var/www/html && \
 
 EXPOSE 80
 
-# 10. مسح الكاش، بناء الجداول، ثم تأكيد صلاحيات الكتابة قبل تشغيل السيرفر مباشرة
-CMD php artisan optimize:clear && \
+# 10. مسح كاش الإعدادات فقط، ثم بناء الجداول وحقن البيانات أولاً، ثم ضبط الصلاحيات وتشغيل السيرفر
+CMD php artisan config:clear && \
+    php artisan view:clear && \
     php artisan migrate:fresh --seed --force && \
     chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database && \
     chmod -R 777 /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database && \
