@@ -11,9 +11,17 @@
                 </div>
 
                 <!-- Navigation Links -->
-                <div class="hidden space-x-8 sm:-my-px sm:ms-10 sm:flex">
-                    <x-nav-link :href="route('dashboard')" :active="request()->routeIs('dashboard')">
-                        {{ __('Dashboard') }}
+                <div class="hidden space-x-8 sm:-my-px sm:ms-10 sm:flex" dir="rtl">
+                    <x-nav-link :href="route('dashboard')" :active="request()->routeIs('dashboard') || request()->routeIs('inventory.*')">
+                        {{ __('المخزون واللوحة') }}
+                    </x-nav-link>
+
+                    <x-nav-link :href="route('pages.second')" :active="request()->routeIs('pages.second')">
+                        {{ __('مساعد الواتساب') }}
+                    </x-nav-link>
+
+                    <x-nav-link :href="route('pages.third')" :active="request()->routeIs('pages.third')">
+                        {{ __('إعدادات الربط API') }}
                     </x-nav-link>
                 </div>
             </div>
@@ -35,7 +43,7 @@
 
                     <x-slot name="content">
                         <x-dropdown-link :href="route('profile.edit')">
-                            {{ __('Profile') }}
+                            {{ __('الملف الشخصي') }}
                         </x-dropdown-link>
 
                         <!-- Authentication -->
@@ -45,7 +53,7 @@
                             <x-dropdown-link :href="route('logout')"
                                     onclick="event.preventDefault();
                                                 this.closest('form').submit();">
-                                {{ __('Log Out') }}
+                                {{ __('تسجيل الخروج') }}
                             </x-dropdown-link>
                         </form>
                     </x-slot>
@@ -65,10 +73,18 @@
     </div>
 
     <!-- Responsive Navigation Menu -->
-    <div :class="{'block': open, 'hidden': ! open}" class="hidden sm:hidden">
+    <div :class="{'block': open, 'hidden': ! open}" class="hidden sm:hidden" dir="rtl">
         <div class="pt-2 pb-3 space-y-1">
-            <x-responsive-nav-link :href="route('dashboard')" :active="request()->routeIs('dashboard')">
-                {{ __('Dashboard') }}
+            <x-responsive-nav-link :href="route('dashboard')" :active="request()->routeIs('dashboard') || request()->routeIs('inventory.*')">
+                {{ __('المخزون واللوحة') }}
+            </x-responsive-nav-link>
+
+            <x-responsive-nav-link :href="route('pages.second')" :active="request()->routeIs('pages.second')">
+                {{ __('مساعد الواتساب') }}
+            </x-responsive-nav-link>
+
+            <x-responsive-nav-link :href="route('pages.third')" :active="request()->routeIs('pages.third')">
+                {{ __('إعدادات الربط API') }}
             </x-responsive-nav-link>
         </div>
 
@@ -81,7 +97,7 @@
 
             <div class="mt-3 space-y-1">
                 <x-responsive-nav-link :href="route('profile.edit')">
-                    {{ __('Profile') }}
+                    {{ __('الملف الشخصي') }}
                 </x-responsive-nav-link>
 
                 <!-- Authentication -->
@@ -91,7 +107,7 @@
                     <x-responsive-nav-link :href="route('logout')"
                             onclick="event.preventDefault();
                                         this.closest('form').submit();">
-                        {{ __('Log Out') }}
+                        {{ __('تسجيل الخروج') }}
                     </x-responsive-nav-link>
                 </form>
             </div>
