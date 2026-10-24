@@ -8,11 +8,11 @@
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
         <div>
             <h2 class="text-2xl font-bold text-slate-800">
-                جدول المخزون 
+                المخزون 
                 @if(isset($viewingClient))
                     <span class="text-base text-emerald-600 font-semibold">(مخزون العميل: {{ $viewingClient->name }})</span>
                 @else
-                    <span class="text-base text-slate-500 font-semibold">({{ auth()->user()->role === 'admin' ? 'مخزونك العام' : 'مخزونك الخاص' }})</span>
+                    <span class="text-base text-slate-500 font-semibold">({{ auth()->user()->role === 'admin' ? 'مخزونك العام' : ' ' }})</span>
                 @endif
             </h2>
             <p class="text-sm text-slate-500 mt-1">اكتب في خانة البحث ليتم الفرز تلقائيًا دون الحاجة للضغط على Enter.</p>
@@ -72,7 +72,7 @@
             <table class="w-full text-right border-collapse">
                 <thead>
                     <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 text-sm">
-                        <th class="py-4 px-6 font-bold">رقم الصنف (محمي وثابت)</th>
+                        <th class="py-4 px-6 font-bold">رقم الصنف </th>
                         <th class="py-4 px-6 font-bold">اسم الصنف</th>
                         <th class="py-4 px-6 font-bold">الكمية</th>
                         <th class="py-4 px-6 font-bold">السعر</th>

@@ -20,7 +20,7 @@
                 type="text"
                 name="message"
                 value="{{ $customerMessage }}"
-                placeholder="اكتب رسالة زبون للتجربة، مثال: ITM-1001"
+                placeholder="اسال عن اي قطعة في مخزونك سواء برقم الصنف او اسم الصنف "
                 class="flex-1 border border-slate-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
             >
 

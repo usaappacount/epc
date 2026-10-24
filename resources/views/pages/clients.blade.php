@@ -9,7 +9,7 @@
     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
             <div>
-                <h2 class="text-2xl font-bold text-slate-800">👥 إدارة العملاء والتجار</h2>
+                <h2 class="text-2xl font-bold text-slate-800">👥العملاء </h2>
                 <p class="text-sm text-slate-500 mt-1">
                     إضافة العملاء بصيغة الجوال المعتمدة (050 XXX XXXX) وتوليد كود التحقق المؤقت للواتساب (4 أرقام).
                 </p>

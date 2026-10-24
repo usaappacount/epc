@@ -46,7 +46,7 @@
                     class="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500 font-mono text-left"
                     dir="ltr" autocomplete="username">
                 <p id="whatsappHint" class="text-[11px] text-emerald-600 font-medium mt-1.5 hidden items-center gap-1">
-                    <span>✓</span><span>تسجيل الدخول باستخدام رقم الجوال</span>
+                    <span>✓</span><span>سيتم ارسال رمز تحقق مكون من 4 ارقام</span>
                 </p>
             </div>
 

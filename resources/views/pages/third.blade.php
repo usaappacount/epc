@@ -1,6 +1,6 @@
 @extends('layouts.dashboard')
 
-@section('title', 'إعدادات الربط API والـ Webhook')
+@section('title', 'الاعدادات')
 
 @section('content')
 <div class="space-y-6">
@@ -21,11 +21,11 @@
     <!-- كرت إعدادات الـ Webhook -->
     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
         <h2 class="text-2xl font-bold text-slate-800">
-            ⚙️ إعدادات الربط API والـ Webhook
+            ⚙️ الاعدادات
         </h2>
 
         <p class="text-sm text-slate-500 mt-1">
-            استخدم هذا الرابط في منصة الواتساب (GreatWhats) لربط الرسائل والأحداث الواردة تلقائياً.
+            استخدم هذا الرابط لربط الرسائل والأحداث الواردة تلقائياً.
         </p>
 
         <div class="mt-4 flex gap-3">

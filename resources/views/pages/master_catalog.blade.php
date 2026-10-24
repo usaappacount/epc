@@ -3,7 +3,7 @@
 @section('content')
 <div class="space-y-6">
     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-        <h2 class="text-2xl font-bold text-slate-800">🌐 المخزون المشترك الموحد (قلب النظام)</h2>
+        <h2 class="text-2xl font-bold text-slate-800">🌐 المخزون</h2>
         <p class="text-sm text-slate-500 mt-1">
             دمج أرقام الأصناف من جميع العملاء بدون تكرار، وعرض ترجمة أول عميل وإجمالي الكميات. اضغط على <strong>رقم الصنف</strong> لاستعراض التفاصيل والكلمات المفتاحية.
         </p>
@@ -17,7 +17,7 @@
                         <th class="py-3 px-4 font-semibold">رقم الصنف</th>
                         <th class="py-3 px-4 font-semibold">اسم الصنف (أول عميل)</th>
                         <th class="py-3 px-4 font-semibold">إجمالي الكمية</th>
-                        <th class="py-3 px-4 font-semibold">عدد العملاء المالكين</th>
+                        <th class="py-3 px-4 font-semibold">عدد العملاء </th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">

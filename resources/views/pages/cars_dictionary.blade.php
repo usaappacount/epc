@@ -7,7 +7,7 @@
 
     <!-- العنوان العام -->
     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-        <h2 class="text-2xl font-bold text-slate-800">🚗 إعدادات التعريف بالسيارات وسنوات الصنع (لتدريب الـ AI)</h2>
+        <h2 class="text-2xl font-bold text-slate-800">🚗اعدادات التعريف بالسيارات</h2>
         <p class="text-sm text-slate-500 mt-1">
             النظام يقسم الإعدادات لقسمين: تعريف السيارات وفئاتها ومرادفاتها، وقسم أنماط سنوات الصنع. وعند تحليل الأصناف، يتم استبعاد أسماء السيارات والسنوات من الكلمات المفتاحية تلقائياً.
         </p>
@@ -28,8 +28,8 @@
                        class="w-full border border-slate-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500">
             </div>
             <div>
-                <label class="block text-xs font-semibold text-slate-600 mb-1">فئة السيارة</label>
-                <input type="text" name="category" required placeholder="مثال: سيدان / دفع رباعي"
+                <label class="block text-xs font-semibold text-slate-600 mb-1">ماركة السيارة</label>
+                <input type="text" name="category" required placeholder="مثال: TOYOTA / CHANGAN"
                        class="w-full border border-slate-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500">
             </div>
             <div class="flex items-end">
@@ -44,10 +44,10 @@
             <table class="w-full text-right border-collapse text-sm">
                 <thead>
                     <tr class="bg-slate-50 border-b border-slate-200 text-slate-600">
-                        <th class="py-3 px-4 font-semibold">اسم السيارة الأساسي (اضغط لإدارة المرادفات)</th>
-                        <th class="py-3 px-4 font-semibold">فئة السيارة</th>
+                        <th class="py-3 px-4 font-semibold">اسم السيارة </th>
+                        <th class="py-3 px-4 font-semibold">ماركة السيارة</th>
                         <th class="py-3 px-4 font-semibold">عدد المرادفات المسجلة</th>
-                        <th class="py-3 px-4 font-semibold">إجراءات (للآدمن فقط)</th>
+                        <th class="py-3 px-4 font-semibold">الاجراء</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">

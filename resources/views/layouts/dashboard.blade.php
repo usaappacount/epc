@@ -29,7 +29,7 @@
             <a href="{{ route('inventory.index') }}"
                class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('inventory.*') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">
                 <span>📦</span>
-                <span>{{ (auth()->check() && auth()->user()->role === 'admin') ? 'مخزوني / مخزون عميل' : 'مخزوني الخاص' }}</span>
+                <span>{{ (auth()->check() && auth()->user()->role === 'admin') ? 'مخزوني / مخزون عميل' : 'المخزون' }}</span>
             </a>
 
             <!-- الرد الآلي والذكاء الاصطناعي -->
@@ -42,18 +42,18 @@
             @if(auth()->check() && auth()->user()->role === 'admin')
                 <div class="pt-3 pb-1 px-4 text-[11px] font-bold text-slate-500 uppercase">إدارة قلب النظام (المدير)</div>
 
-                <!-- إدارة العملاء -->
+                <!-- العملاء -->
                 <a href="{{ route('clients.index') }}"
                    class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('clients.*') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">
                     <span>👥</span>
-                    <span>إدارة العملاء</span>
+                    <span>العملاء</span>
                 </a>
 
-                <!-- المخزون المشترك (قلب النظام) -->
+                <!-- المخزون ( خاص ) -->
                 <a href="{{ route('master.catalog') }}"
                    class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('master.*') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">
                     <span>🌐</span>
-                    <span>المخزون المشترك (القلب)</span>
+                    <span> المخزون ( خاص )</span>
                 </a>
 
                 <!-- قاموس السيارات لتعليم الـ AI -->
