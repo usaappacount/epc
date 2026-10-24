@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
 # تنظيف الذاكرة المؤقتة
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# تثبيت إضافات PHP الضرورية (تمت إضافة zip هنا)
+# تثبيت إضافات PHP الضرورية
 RUN docker-php-ext-install pdo_sqlite mbstring exif pcntl bcmath gd zip
 
 # تحميل أداة Composer لإدارة حزم لارافيل
@@ -26,6 +26,16 @@ WORKDIR /var/www/html
 
 # نسخ ملفات المشروع إلى السيرفر
 COPY . /var/www/html
+
+# حل جذري: إنشاء ملف .env نظيف وتوليد مفتاح التشفير وقاعدة البيانات تلقائياً
+RUN rm -f .env bootstrap/cache/*.php && \
+    cp .env.example .env || touch .env && \
+    echo "APP_NAME=Laravel" > .env && \
+    echo "APP_ENV=production" >> .env && \
+    echo "APP_KEY=base64:MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=" >> .env && \
+    echo "APP_DEBUG=true" >> .env && \
+    echo "DB_CONNECTION=sqlite" >> .env && \
+    touch database/database.sqlite
 
 # توجيه سيرفر Apache إلى مجلد public الخاص بلارافيل
 ENV APACHE_DOCUMENT_ROOT /var/www/html/public
@@ -38,13 +48,12 @@ RUN a2enmod rewrite
 # تثبيت الحزم عبر Composer
 RUN composer install --no-dev --optimize-autoloader
 
-# ضبط الصلاحيات لمجلدات التخزين والكاش
-RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
-RUN chmod -R 775 storage bootstrap/cache
+# ضبط الصلاحيات لمجلدات التخزين والكاش وقاعدة البيانات
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database
+RUN chmod -R 775 storage bootstrap/cache database
 
 # فتح المنفذ 80 للاتصال
 EXPOSE 80
 
-# أمر التشغيل النهائي لتخزين الكاش وتشغيل السيرفر
-ENV APP_KEY=base64:MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=
-CMD php artisan config:clear && apache2-foreground
+# تشغيل السيرفر وتجهيز الجداول تلقائياً
+CMD php artisan config:clear && php artisan migrate --force && apache2-foreground
