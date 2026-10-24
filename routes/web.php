@@ -1,190 +1,1089 @@
 <?php
 
+
+
 use App\Http\Controllers\ItemController;
+
 use App\Http\Controllers\ProfileController;
+
 use App\Models\Item;
+
+use App\Models\User;
+
 use Illuminate\Http\Request;
+
 use Illuminate\Support\Facades\Route;
+
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Blade;
+
+use Illuminate\Support\Facades\Hash;
+
+use Illuminate\Support\Facades\Auth;
+
+
 
 Route::get('/', function () {
+
     return redirect()->route('inventory.index');
+
 });
+
+
 
 Route::get('/dashboard', function () {
+
     return redirect()->route('inventory.index');
+
 })->middleware(['auth', 'verified'])->name('dashboard');
 
-// دالة موحدة لمعالجة طلبات الـ Webhook
-function handleWebhook(Request $request) {
-    $signature = $request->header('x-webhook-signature');
-    $webhookSecret = env('GREATWHATS_WEBHOOK_SECRET');
 
-    if (!empty($webhookSecret)) {
-        $rawBody = $request->getContent();
-        $expectedSignature = 'sha256=' . hash_hmac('sha256', $rawBody, $webhookSecret);
 
-        if (!$signature || !hash_equals($expectedSignature, $signature)) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => 'Invalid signature - التوقيع غير صالح'
-            ], 401);
-        }
+/**
+
+ * دالة لتنسيق رقم الجوال بالصيغة الدولية الموحدة +966
+
+ */
+
+function formatSaudiPhoneIntl($phone) {
+
+    $digits = preg_replace('/\D/', '', $phone);
+
+    if (str_starts_with($digits, '966')) {
+
+        $digits = substr($digits, 3);
+
     }
 
-    DB::table('webhook_logs')->insert([
-        'event_type' => $request->input('event', 'unknown'),
-        'payload'    => json_encode($request->all(), JSON_UNESCAPED_UNICODE),
-        'created_at' => now(),
-        'updated_at' => now(),
-    ]);
+    if (str_starts_with($digits, '0')) {
 
-    return response()->json([
-        'status'  => 'success',
-        'message' => 'تم استلام الحدث ومعالجته بنجاح',
-    ], 200);
+        $digits = substr($digits, 1);
+
+    }
+
+    if (strlen($digits) === 9) {
+
+        return '+966' . $digits;
+
+    }
+
+    return $phone;
+
 }
 
-Route::post('/api/webhook/receiver', function (Request $request) {
-    return handleWebhook($request);
-});
 
-Route::post('/api/webhook/receiver/', function (Request $request) {
-    return handleWebhook($request);
-});
 
-Route::middleware('auth')->group(function () {
-    // مسارات المخزون
-    Route::prefix('inventory')->name('inventory.')->group(function () {
-        Route::get('/', [ItemController::class, 'index'])->name('index');
-        Route::post('/', [ItemController::class, 'store'])->name('store');
-        Route::post('/import', [ItemController::class, 'import'])->name('import');
-        Route::put('/{item}', [ItemController::class, 'update'])->name('update');
-        Route::delete('/{item}', [ItemController::class, 'destroy'])->name('destroy');
-    });
+/**
 
-    // مسار صفحة الذكاء الاصطناعي والواتساب (الصفحة الثانية)
-    Route::get('/ai-whatsapp', function (Request $request) {
-        $customerMessage = (string) $request->query('message', '');
-        $matchedItems = collect();
-        $aiReply = null;
+ * دالة التحليل والربط الذكية بقلب النظام والسيارات والسنوات
 
-        if (trim($customerMessage) !== '') {
-            $matchedItems = Item::smartSearch($customerMessage)->take(5)->get();
-            if ($matchedItems->isNotEmpty()) {
-                $lines = ["مرحباً بك! إليك الأصناف المتوفرة حسب طلبك:\n"];
-                foreach ($matchedItems as $item) {
-                    $status = $item->quantity > 0 ? "متوفر ({$item->quantity})" : "غير متوفر";
-                    $lines[] = "🔹 *{$item->item_name}* | السعر: {$item->price} ر.س | الحالة: {$status}";
-                }
-                $aiReply = implode("\n\n", $lines);
-            } else {
-                $aiReply = "عذراً، لم نتمكن من العثور على صنف يطابق طلبك ({$customerMessage}).";
+ */
+
+function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId = null): void {
+
+    $cleanNumber = strtoupper(trim($itemNumber));
+
+    $cleanName = trim($itemName);
+
+
+
+    if ($cleanNumber === '') return;
+
+
+
+    $detectedCar = null;
+
+    $detectedCategory = null;
+
+    $detectedYears = null;
+
+
+
+    $carsList = DB::table('cars')->get();
+
+    foreach ($carsList as $car) {
+
+        if (mb_stripos($cleanName, $car->car_name) !== false) {
+
+            $detectedCar = $car->car_name;
+
+            $detectedCategory = $car->category;
+
+            break;
+
+        }
+
+        $aliases = DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray();
+
+        foreach ($aliases as $alias) {
+
+            if ($alias !== '' && mb_stripos($cleanName, $alias) !== false) {
+
+                $detectedCar = $car->car_name;
+
+                $detectedCategory = $car->category;
+
+                break 2;
+
             }
+
         }
 
-        return view('pages.second', [
-            'customerMessage' => $customerMessage,
-            'message'         => $customerMessage,
-            'aiReply'         => $aiReply,
-            'reply'           => $aiReply,
-            'botReply'        => $aiReply,
-            'response'        => $aiReply,
-            'matchedItems'    => $matchedItems,
-            'items'           => $matchedItems,
+    }
+
+
+
+    $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
+
+    $wordsInName = preg_split('/[\s,\\-\\+\\/\\(\\)\\*\\.]+/u', $cleanName, -1, PREG_SPLIT_NO_EMPTY);
+
+
+
+    foreach ($patterns as $pattern) {
+
+        if (mb_stripos($cleanName, $pattern) !== false) {
+
+            $detectedYears = $pattern;
+
+            break;
+
+        }
+
+    }
+
+    if (!$detectedYears) {
+
+        foreach ($wordsInName as $word) {
+
+            if (preg_match('/^(?:(?:19|20)?\d{2})[\/-](?:(?:19|20)?\d{2})$/u', $word) || preg_match('/^\d{2}[\\-\\/]\d{2}$/u', $word)) {
+
+                $detectedYears = $word;
+
+                break;
+
+            }
+
+        }
+
+    }
+
+
+
+    DB::table('items')
+
+        ->where('item_number', $cleanNumber)
+
+        ->update([
+
+            'detected_car_name' => $detectedCar,
+
+            'detected_category' => $detectedCategory,
+
+            'detected_years'    => $detectedYears,
+
         ]);
-    })->name('pages.second');
 
-    // الصفحة الثالثة: تعمل مباشرة ومضمونة 100% حتى بدون ملف خارجي
-    Route::get('/page-third', function () {
-        $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
 
-        // إذا كان الملف موجوداً في pages.third أو third يفتحه، وإلا يعرض التصميم المدمج فوراً
-        if (view()->exists('pages.third')) {
-            return view('pages.third', compact('webhookLogs'));
+
+    $existingMaster = DB::table('master_items')->where('item_number', $cleanNumber)->first();
+
+    if (!$existingMaster) {
+
+        DB::table('master_items')->insert([
+
+            'item_number'     => $cleanNumber,
+
+            'first_item_name' => $cleanName,
+
+            'first_user_id'   => $userId,
+
+            'created_at'      => now(),
+
+            'updated_at'      => now(),
+
+        ]);
+
+    }
+
+
+
+    $skipWords = [];
+
+    if ($detectedCar) {
+
+        $skipWords = array_merge($skipWords, preg_split('/[\s,\\-]+/u', $detectedCar));
+
+    }
+
+    if ($detectedYears) {
+
+        $skipWords[] = $detectedYears;
+
+    }
+
+    $skipWords = array_map('mb_strtolower', array_filter($skipWords));
+
+
+
+    foreach ($wordsInName as $word) {
+
+        $wordClean = trim($word);
+
+        $wordLower = mb_strtolower($wordClean);
+
+
+
+        if (mb_strlen($wordClean) >= 2 && !is_numeric($wordClean) && !in_array($wordLower, $skipWords)) {
+
+            DB::table('item_keywords')->insertOrIgnore([
+
+                'item_number' => $cleanNumber,
+
+                'keyword'     => $wordClean,
+
+                'created_at'  => now(),
+
+                'updated_at'  => now(),
+
+            ]);
+
         }
-        if (view()->exists('third')) {
-            return view('third', compact('webhookLogs'));
-        }
 
-        $html = <<<'BLADE'
-<x-app-layout>
-    <x-slot name="header">
-        <h2 class="font-semibold text-xl text-gray-800 leading-tight text-right">
-            {{ __('إعدادات الربط API') }}
-        </h2>
-    </x-slot>
+    }
 
-    <div class="py-12" dir="rtl">
-        <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
-            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg p-6">
-                <h3 class="text-lg font-bold mb-2 text-gray-900">🔗 رابط استقبال الـ Webhook (Webhook URL)</h3>
-                <p class="text-gray-600 text-sm mb-4">استخدم هذا الرابط في إعدادات منصة الواتساب (GreatWhats) لربط الرسائل والأحداث:</p>
-                <div class="flex items-center gap-2 bg-gray-100 p-3 rounded-md border border-gray-300">
-                    <input type="text" readonly value="{{ url('/api/webhook/receiver') }}" class="w-full bg-transparent border-none text-gray-800 focus:ring-0 text-sm" id="webhookUrl">
-                    <button onclick="navigator.clipboard.writeText(document.getElementById('webhookUrl').value); alert('تم نسخ الرابط بنجاح!');" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700 transition">
-                        نسخ الرابط
-                    </button>
-                </div>
-            </div>
+}
 
-            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg p-6">
-                <h3 class="text-lg font-bold mb-2 text-gray-900">💾 النسخ الاحتياطي لقاعدة البيانات</h3>
-                <p class="text-gray-600 text-sm mb-4">قم بتحميل نسخة احتياطية لجميع البيانات (الموظفين، الأصناف، السجلات) إلى جهازك:</p>
-                <a href="{{ route('backup.download') }}" class="inline-flex items-center bg-green-600 text-white px-4 py-2 rounded-md text-sm hover:bg-green-700 transition">
-                    📥 تحميل نسخة احتياطية الآن (.sqlite)
-                </a>
-            </div>
 
-            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg p-6">
-                <h3 class="text-lg font-bold mb-4 text-gray-900">📋 سجلات الطلبات الواردة (Webhook Logs)</h3>
-                @if(isset($webhookLogs) && $webhookLogs->count() > 0)
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200 text-right">
-                            <thead class="bg-gray-50">
-                                <tr>
-                                    <th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase">نوع الحدث</th>
-                                    <th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase">البيانات (Payload)</th>
-                                    <th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase">الوقت</th>
-                                </tr>
-                            </thead>
-                            <tbody class="bg-white divide-y divide-gray-200 text-sm">
-                                @foreach($webhookLogs as $log)
-                                    <tr>
-                                        <td class="px-6 py-4 whitespace-nowrap font-semibold text-blue-600">{{ $log->event_type }}</td>
-                                        <td class="px-6 py-4 text-gray-600 max-w-xs truncate" title="{{ $log->payload }}">{{ $log->payload }}</td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-gray-400 text-xs">{{ $log->created_at }}</td>
-                                    </tr>
-                                @endforeach
-                            </tbody>
-                        </table>
-                    </div>
-                @else
-                    <p class="text-gray-500 text-center py-6">لا توجد سجلات واردة حتى الآن.</p>
-                @endif
-            </div>
-        </div>
-    </div>
-</x-app-layout>
-BLADE;
 
-        return Blade::render($html, compact('webhookLogs'));
-    })->name('pages.third');
+function syncAllExistingItemsToCore(): void {
 
-    // مسار تحميل النسخة الاحتياطية لقاعدة البيانات
-    Route::get('/download-backup', function () {
-        $path = database_path('database.sqlite');
-        if (!file_exists($path)) {
-            return back()->with('error', 'ملف قاعدة البيانات غير موجود.');
-        }
-        return response()->download($path, 'database_backup_' . date('Y-m-d_H-i-s') . '.sqlite');
-    })->name('backup.download');
+    $allItems = DB::table('items')->orderBy('id', 'asc')->get();
 
-    // مسارات الملف الشخصي
-    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
-    Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
-    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
-});
+    foreach ($allItems as $item) {
+
+        syncItemToMasterCore($item->item_number, $item->item_name, $item->user_id);
+
+    }
+
+}
+
+
+
+function handleWebhook(Request $request) {
+
+    DB::table('webhook_logs')->insert([
+
+        'event_type' => $request->input('event', 'unknown'),
+
+        'payload'    => json_encode($request->all(), JSON_UNESCAPED_UNICODE),
+
+        'created_at' => now(),
+
+        'updated_at' => now(),
+
+    ]);
+
+    return response()->json(['status' => 'success'], 200);
+
+}
+
+Route::post('/api/webhook/receiver', fn(Request $r) => handleWebhook($r));
+
+Route::post('/api/webhook/receiver/', fn(Request $r) => handleWebhook($r));
+
+
 
 require __DIR__.'/auth.php';
+
+// معالجة تسجيل الدخول الموحد (إدارة أو عملاء) مع توليد وإظهار كود الـ OTP مؤقتاً
+
+Route::post('/login', function (Request $request) {
+
+    $loginInput = trim($request->input('login', ''));
+
+    $password = trim($request->input('password', ''));
+
+    $cleanInput = preg_replace('/\D/', '', $loginInput);
+
+
+
+    // الحالة الأولى: إذا أدخل رقم جوال (10 أرقام تبدأ بـ 0)
+
+    if (strlen($cleanInput) === 10 && str_starts_with($cleanInput, '0')) {
+
+        $formattedTarget = formatSaudiPhoneIntl($loginInput);
+
+        $localAlternative = $cleanInput;
+
+
+
+        $user = User::where('phone', $formattedTarget)
+
+                    ->orWhere('phone', $localAlternative)
+
+                    ->first();
+
+
+
+        if (!$user) {
+
+            return back()->withInput()->with('error', 'رقم الجوال هذا غير مسجل في النظام.');
+
+        }
+
+
+
+        if (!$user->is_active) {
+
+            return back()->withInput()->with('error', 'تم إيقاف حسابك مؤقتاً، يرجى التواصل مع الإدارة.');
+
+        }
+
+
+
+        // إذا لم يدخل المستخدم كلمة المرور/الكود بعد (الخطوة الأولى: طلب الكود)
+
+        if (empty($password)) {
+
+            // توليد كود جديد عند كل طلب، مؤقتاً لحين ربط خدمة واتساب
+            $user->otp_code = (string) random_int(1000, 9999);
+            $user->save();
+
+            // تعرض صفحة تسجيل الدخول قيمة session('success') ككود مؤقت للاختبار
+            return back()->withInput()
+                         ->with('phone_for_otp', $loginInput)
+                         ->with('success', $user->otp_code);
+
+        }
+
+        // الخطوة الثانية: التحقق من كود الـ OTP المدخل
+        if (!empty($user->otp_code) && hash_equals((string) $user->otp_code, (string) $password)) {
+
+            $user->otp_code = null;
+            $user->save();
+
+            Auth::login($user);
+            $request->session()->regenerate();
+
+            return redirect()->route('inventory.index');
+
+        } else {
+
+            return back()->withInput()
+                         ->with('phone_for_otp', $loginInput)
+                         ->with('success', $user->otp_code)
+                         ->with('error', 'كود التحقق غير صحيح. حاول مرة أخرى.');
+
+        }
+
+    }
+
+
+
+    // الحالة الثانية: تسجيل دخول الإدارة (اسم المستخدم/البريد وكلمة المرور)
+
+    else {
+
+        if (Auth::attempt(['email' => $loginInput, 'password' => $password])) {
+
+            $request->session()->regenerate();
+
+            return redirect()->intended('/dashboard');
+
+        }
+
+
+
+        $user = User::where('email', $loginInput)->orWhere('name', $loginInput)->first();
+
+        if ($user && Hash::check($password, $user->password)) {
+
+            Auth::login($user);
+
+            return redirect()->intended('/dashboard');
+
+        }
+
+
+
+        return back()->withInput()->with('error', 'بيانات الدخول غير صحيحة.');
+
+    }
+
+})->name('login');
+
+
+
+Route::middleware('auth')->group(function () {
+
+
+
+    // 1. المخزون
+
+    Route::prefix('inventory')->name('inventory.')->group(function () {
+
+        Route::get('/', function (Request $request) {
+
+            $user = auth()->user();
+
+            $targetUserId = $user->id;
+
+
+
+            if ($user->role === 'admin' && $request->filled('client_id')) {
+
+                $targetUserId = (int) $request->query('client_id');
+
+            }
+
+
+
+            $query = Item::query();
+
+            if ($user->role !== 'admin' || $request->filled('client_id')) {
+
+                $query->where('user_id', $targetUserId);
+
+            }
+
+
+
+            if ($request->filled('search')) {
+
+                $s = $request->query('search');
+
+                $query->where(function ($q) use ($s) {
+
+                    $q->where('item_number', 'like', "%{$s}%")
+
+                      ->orWhere('item_name', 'like', "%{$s}%")
+
+                      ->orWhere('detected_car_name', 'like', "%{$s}%");
+
+                });
+
+            }
+
+
+
+            $items = $query->latest()->paginate(15);
+
+
+
+            if ($request->ajax() || $request->wantsJson()) {
+
+                $html = view('inventory.partials.table_rows', compact('items'))->render();
+
+                return response()->json(['html' => $html]);
+
+            }
+
+
+
+            $viewingClient = $request->filled('client_id') ? User::find($targetUserId) : null;
+
+
+
+            return view('inventory.index', compact('items', 'viewingClient'));
+
+        })->name('index');
+
+
+
+        Route::post('/', function (Request $request) {
+
+            $data = $request->validate([
+
+                'item_number' => 'required|string|max:255',
+
+                'item_name'   => 'required|string|max:255',
+
+                'quantity'    => 'required|integer|min:0',
+
+                'price'       => 'required|numeric|min:0',
+
+            ]);
+
+
+
+            $userId = auth()->id();
+
+            $item = Item::create([
+
+                'user_id'     => $userId,
+
+                'item_number' => strtoupper(trim($data['item_number'])),
+
+                'item_name'   => trim($data['item_name']),
+
+                'quantity'    => $data['quantity'],
+
+                'price'       => $data['price'],
+
+            ]);
+
+
+
+            syncItemToMasterCore($item->item_number, $item->item_name, $userId);
+
+
+
+            return back()->with('success', 'تمت إضافة الصنف بنجاح.');
+
+        })->name('store');
+
+
+
+        Route::post('/import', function (Request $request) {
+
+            $response = app(ItemController::class)->import($request);
+
+            DB::table('items')->whereNull('user_id')->update(['user_id' => auth()->id()]);
+
+            syncAllExistingItemsToCore();
+
+            return $response;
+
+        })->name('import');
+
+
+
+        Route::put('/{item}', function (Request $request, Item $item) {
+
+            if (auth()->user()->role !== 'admin' && $item->user_id !== auth()->id()) {
+
+                abort(403);
+
+            }
+
+
+
+            $item->update([
+
+                'item_name' => $request->input('item_name', $item->item_name),
+
+                'quantity'  => $request->input('quantity', $item->quantity),
+
+                'price'     => $request->input('price', $item->price),
+
+            ]);
+
+
+
+            syncItemToMasterCore($item->item_number, $item->item_name, $item->user_id);
+
+            return back()->with('success', 'تم تحديث الصنف (رقم الصنف محمي وثابت).');
+
+        })->name('update');
+
+
+
+        Route::delete('/{item}', [ItemController::class, 'destroy'])->name('destroy');
+
+    });
+
+
+
+    // 2. إدارة العملاء
+
+    Route::get('/clients', function () {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        $clients = User::where('role', '!=', 'admin')
+
+            ->orWhereNull('role')
+
+            ->get()
+
+            ->map(function ($client) {
+
+                $client->items_count = DB::table('items')->where('user_id', $client->id)->count();
+
+                return $client;
+
+            });
+
+
+
+        return view('pages.clients', compact('clients'));
+
+    })->name('clients.index');
+
+
+
+    Route::post('/clients', function (Request $request) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        $request->validate([
+
+            'name'  => 'required|string|max:255',
+
+            'phone' => 'required|string|max:20',
+
+            'city'  => 'required|string|max:100',
+
+        ]);
+
+
+
+        $otp = (string) rand(1000, 9999);
+
+        $formattedPhone = formatSaudiPhoneIntl($request->phone);
+
+        $cleanDigits = preg_replace('/\D/', '', $request->phone);
+
+
+
+        User::create([
+
+            'name'      => $request->name,
+
+            'email'     => $cleanDigits . '@client.local',
+
+            'phone'     => $formattedPhone,
+
+            'city'      => $request->city,
+
+            'role'      => 'client',
+
+            'otp_code'  => $otp,
+
+            'is_active' => true,
+
+            'password'  => Hash::make($otp),
+
+        ]);
+
+
+
+        return back()->with('success', "تمت إضافة العميل ({$request->name}) بنجاح! رقم الجوال: {$formattedPhone} | كود التحقق: {$otp}");
+
+    })->name('clients.store');
+
+
+
+    Route::put('/clients/{id}', function (Request $request, $id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        $client = User::findOrFail($id);
+
+        $formattedPhone = formatSaudiPhoneIntl($request->phone);
+
+
+
+        $client->update([
+
+            'name'  => $request->name,
+
+            'phone' => $formattedPhone,
+
+            'city'  => $request->city,
+
+        ]);
+
+        return back()->with('success', 'تم تحديث بيانات العميل بنجاح.');
+
+    })->name('clients.update');
+
+
+
+    Route::post('/clients/{id}/toggle', function ($id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        $client = User::findOrFail($id);
+
+        $client->update(['is_active' => !$client->is_active]);
+
+        return back()->with('success', 'تم تغيير حالة حساب العميل.');
+
+    })->name('clients.toggle');
+
+
+
+    Route::delete('/clients/{id}', function ($id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        DB::table('items')->where('user_id', $id)->delete();
+
+        User::where('id', $id)->delete();
+
+        return back()->with('success', 'تم حذف العميل وجميع أصنافه بنجاح.');
+
+    })->name('clients.destroy');
+
+
+
+    // 3. المخزون المشترك (قلب النظام)
+
+    Route::get('/master-catalog', function () {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        syncAllExistingItemsToCore();
+
+
+
+        $masterItems = DB::table('master_items')
+
+            ->select(
+
+                'master_items.item_number',
+
+                'master_items.first_item_name',
+
+                DB::raw('COALESCE(SUM(items.quantity), 0) as total_quantity'),
+
+                DB::raw('COUNT(DISTINCT items.user_id) as clients_count')
+
+            )
+
+            ->leftJoin('items', 'master_items.item_number', '=', 'items.item_number')
+
+            ->groupBy('master_items.item_number', 'master_items.first_item_name')
+
+            ->orderByDesc('total_quantity')
+
+            ->get();
+
+
+
+        return view('pages.master_catalog', compact('masterItems'));
+
+    })->name('master.catalog');
+
+
+
+    // 4. صفحة الصنف المقسومة
+
+    Route::get('/master-catalog/{itemNumber}', function ($itemNumber) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        $master = DB::table('master_items')->where('item_number', $itemNumber)->first();
+
+
+
+        $clientHoldings = DB::table('items')
+
+            ->leftJoin('users', 'items.user_id', '=', 'users.id')
+
+            ->select(
+
+                'items.*',
+
+                DB::raw("COALESCE(users.name, 'المدير العام') as client_name")
+
+            )
+
+            ->where('items.item_number', $itemNumber)
+
+            ->get();
+
+
+
+        $keywords = DB::table('item_keywords')
+
+            ->where('item_number', $itemNumber)
+
+            ->orderBy('id', 'asc')
+
+            ->get();
+
+
+
+        return view('pages.master_details', compact('itemNumber', 'master', 'clientHoldings', 'keywords'));
+
+    })->name('master.item.details');
+
+
+
+    Route::post('/master-catalog/{itemNumber}/keyword', function (Request $request, $itemNumber) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        $word = trim($request->input('keyword'));
+
+        if ($word !== '') {
+
+            DB::table('item_keywords')->insertOrIgnore([
+
+                'item_number' => $itemNumber,
+
+                'keyword'     => $word,
+
+                'created_at'  => now(),
+
+                'updated_at'  => now(),
+
+            ]);
+
+        }
+
+        return back()->with('success', 'تمت إضافة الكلمة المفتاحية بنجاح.');
+
+    })->name('master.item.keyword.add');
+
+
+
+    // 5. إعدادات السيارات والذكاء الاصطناعي
+
+    Route::get('/cars-dictionary', function () {
+
+        if (auth()->user()->role !== 'admin') {
+
+            abort(403, 'هذه الصفحة مخصصة لمدير النظام فقط.');
+
+        }
+
+
+
+        $cars = DB::table('cars')->latest()->get();
+
+        $yearPatterns = DB::table('year_patterns')->latest()->get();
+
+
+
+        return view('pages.cars_dictionary', compact('cars', 'yearPatterns'));
+
+    })->name('cars.dictionary');
+
+
+
+    Route::post('/cars-dictionary/car', function (Request $request) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        $request->validate([
+
+            'car_name' => 'required|string|max:255',
+
+            'category' => 'required|string|max:255',
+
+        ]);
+
+
+
+        DB::table('cars')->insert([
+
+            'car_name'   => trim($request->car_name),
+
+            'category'   => trim($request->category),
+
+            'created_at' => now(),
+
+            'updated_at' => now(),
+
+        ]);
+
+
+
+        return back()->with('success', 'تمت إضافة السيارة وفئتها بنجاح.');
+
+    })->name('cars.store');
+
+
+
+    Route::delete('/cars-dictionary/car/{id}', function ($id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        DB::table('cars')->where('id', $id)->delete();
+
+        return back()->with('success', 'تم حذف السيارة ومرادفاتها بنجاح.');
+
+    })->name('cars.destroy');
+
+
+
+    Route::get('/cars-dictionary/car/{id}/aliases', function ($id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        $car = DB::table('cars')->where('id', $id)->first();
+
+        if (!$car) abort(404);
+
+
+
+        $aliases = DB::table('car_aliases')->where('car_id', $id)->get();
+
+
+
+        return view('pages.car_aliases', compact('car', 'aliases'));
+
+    })->name('cars.aliases');
+
+
+
+    Route::post('/cars-dictionary/car/{id}/aliases', function (Request $request, $id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        DB::table('car_aliases')->insert([
+
+            'car_id'     => $id,
+
+            'alias'      => trim($request->alias),
+
+            'created_at' => now(),
+
+            'updated_at' => now(),
+
+        ]);
+
+
+
+        return back()->with('success', 'تمت إضافة المرادف بنجاح.');
+
+    })->name('cars.aliases.store');
+
+
+
+    Route::delete('/cars-dictionary/alias/{id}', function ($id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        DB::table('car_aliases')->where('id', $id)->delete();
+
+        return back()->with('success', 'تم حذف المرادف.');
+
+    })->name('cars.aliases.delete');
+
+
+
+    Route::post('/cars-dictionary/year-pattern', function (Request $request) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+
+
+        DB::table('year_patterns')->insert([
+
+            'pattern_example' => trim($request->pattern_example),
+
+            'created_at'      => now(),
+
+            'updated_at'      => now(),
+
+        ]);
+
+
+
+        return back()->with('success', 'تمت إضافة نمط سنة الصنع بنجاح.');
+
+    })->name('year.pattern.store');
+
+
+
+    Route::delete('/cars-dictionary/year-pattern/{id}', function ($id) {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        DB::table('year_patterns')->where('id', $id)->delete();
+
+        return back()->with('success', 'تم الحذف.');
+
+    })->name('year.pattern.destroy');
+
+
+
+    // 6. مسارات الرد الآلي والذكاء الاصطناعي
+
+    Route::get('/ai-whatsapp', function (Request $request) {
+
+        $customerMessage = (string) $request->query('message', '');
+
+        $matchedItems = collect();
+
+
+
+        if (trim($customerMessage) !== '') {
+
+            $matchedNumbers = DB::table('item_keywords')
+
+                ->where('keyword', 'like', "%{$customerMessage}%")
+
+                ->pluck('item_number')
+
+                ->toArray();
+
+
+
+            $matchedItems = Item::whereIn('item_number', $matchedNumbers)
+
+                ->orWhere('item_number', 'like', "%{$customerMessage}%")
+
+                ->orWhere('item_name', 'like', "%{$customerMessage}%")
+
+                ->take(10)
+
+                ->get();
+
+        }
+
+
+
+        return view('pages.second', [
+
+            'customerMessage' => $customerMessage,
+
+            'matchedItems'    => $matchedItems,
+
+        ]);
+
+    })->name('pages.second');
+
+
+
+    // 7. إعدادات الربط API والنسخ الاحتياطي
+
+    Route::get('/page-third', function () {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
+
+        return view('pages.third', compact('webhookLogs'));
+
+    })->name('pages.third');
+
+
+
+    Route::get('/download-backup', function () {
+
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        $path = database_path('database.sqlite');
+
+        return response()->download($path, 'database_backup_' . date('Y-m-d_H-i-s') . '.sqlite');
+
+    })->name('backup.download');
+
+
+
+    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
+
+    Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
+
+    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+
+});
+
+
+

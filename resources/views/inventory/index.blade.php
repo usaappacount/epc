@@ -1,4 +1,3 @@
-
 @extends('layouts.dashboard')
 
 @section('title', 'لوحة التحكم - إدارة المخزون')
@@ -8,18 +7,31 @@
 
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
         <div>
-            <h2 class="text-2xl font-bold text-slate-800">جدول المخزون</h2>
+            <h2 class="text-2xl font-bold text-slate-800">
+                جدول المخزون 
+                @if(isset($viewingClient))
+                    <span class="text-base text-emerald-600 font-semibold">(مخزون العميل: {{ $viewingClient->name }})</span>
+                @else
+                    <span class="text-base text-slate-500 font-semibold">({{ auth()->user()->role === 'admin' ? 'مخزونك العام' : 'مخزونك الخاص' }})</span>
+                @endif
+            </h2>
             <p class="text-sm text-slate-500 mt-1">اكتب في خانة البحث ليتم الفرز تلقائيًا دون الحاجة للضغط على Enter.</p>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
+            @if(isset($viewingClient))
+                <a href="{{ route('clients.index') }}" class="bg-slate-200 hover:bg-slate-300 text-slate-800 px-4 py-2 rounded-lg text-sm font-semibold transition">
+                    🔙 عودة لقائمة العملاء
+                </a>
+            @endif
+
             <div class="relative">
                 <input type="text" id="live-search" value="{{ request('search') }}"
                        placeholder="ابحث برقم أو اسم الصنف تلقائيًا..."
                        class="w-72 border border-slate-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500">
             </div>
 
-            @if(auth()->user()->role === 'admin')
+            @if(auth()->user()->role === 'admin' && !isset($viewingClient))
                 <button type="button"
                         onclick="document.getElementById('excel-modal').classList.remove('hidden')"
                         class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition">
@@ -29,16 +41,17 @@
         </div>
     </div>
 
-    @if(auth()->user()->role === 'admin')
+    <!-- نموذج إضافة صنف جديد -->
+    @if(auth()->user()->role === 'admin' || !isset($viewingClient))
     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
         <h3 class="text-base font-bold text-slate-700 mb-4">إضافة صنف جديد</h3>
 
         <form method="POST" action="{{ route('inventory.store') }}" class="grid grid-cols-1 md:grid-cols-5 gap-4">
             @csrf
-            <input type="text" name="item_number" value="{{ old('item_number') }}" placeholder="رقم الصنف" required
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
+            <input type="text" name="item_number" value="{{ old('item_number') }}" placeholder="رقم الصنف (فريد)" required
+                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm uppercase">
 
-            <input type="text" name="item_name" value="{{ old('item_name') }}" placeholder="اسم الصنف" required
+            <input type="text" name="item_name" value="{{ old('item_name') }}" placeholder="اسم الصنف / الترجمة" required
                    class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
 
             <input type="number" name="quantity" value="{{ old('quantity') }}" placeholder="الكمية" min="0" required
@@ -59,7 +72,7 @@
             <table class="w-full text-right border-collapse">
                 <thead>
                     <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 text-sm">
-                        <th class="py-4 px-6 font-bold">رقم الصنف</th>
+                        <th class="py-4 px-6 font-bold">رقم الصنف (محمي وثابت)</th>
                         <th class="py-4 px-6 font-bold">اسم الصنف</th>
                         <th class="py-4 px-6 font-bold">الكمية</th>
                         <th class="py-4 px-6 font-bold">السعر</th>
@@ -73,7 +86,7 @@
             </table>
         </div>
 
-        @if($items->hasPages())
+        @if(isset($items) && method_exists($items, 'hasPages') && $items->hasPages())
             <div class="p-4 border-t border-slate-200">
                 {{ $items->withQueryString()->links() }}
             </div>
@@ -81,6 +94,7 @@
     </div>
 </div>
 
+<!-- نافذة استيراد الإكسل -->
 <div id="excel-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
     <div class="bg-white rounded-xl shadow-lg p-6 w-full max-w-md space-y-4">
         <h3 class="text-lg font-bold text-slate-800">استيراد الأصناف من ملف Excel</h3>
@@ -109,18 +123,20 @@
     </div>
 </div>
 
+<!-- نافذة التعديل (رقم الصنف مقفول readonly لا يمكن تعديله نهائياً من قبل العميل) -->
 <div id="edit-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
     <div class="bg-white rounded-xl shadow-lg p-6 w-full max-w-md space-y-4">
         <h3 class="text-lg font-bold text-slate-800">تعديل بيانات الصنف</h3>
+        <p class="text-xs text-rose-600 font-semibold">ملاحظة: رقم الصنف محمي وثابت ولا يمكن تعديله بعد إنشائه.</p>
 
         <form id="edit-form" method="POST" class="space-y-3">
             @csrf
             @method('PUT')
 
             <div>
-                <label for="edit-number" class="text-xs font-semibold text-slate-600">رقم الصنف</label>
-                <input type="text" id="edit-number" name="item_number" required
-                       class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1">
+                <label for="edit-number" class="text-xs font-semibold text-slate-600">رقم الصنف (غير قابل للتعديل)</label>
+                <input type="text" id="edit-number" name="item_number" readonly
+                       class="w-full border border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed rounded-lg px-3 py-2 text-sm mt-1 font-mono">
             </div>
 
             <div>
@@ -157,31 +173,34 @@
 
 <script>
     let searchTimer = null;
-
     const searchInput = document.getElementById('live-search');
     const tableBody = document.getElementById('inventory-table-body');
 
-    searchInput.addEventListener('input', function () {
-        clearTimeout(searchTimer);
-        const query = this.value;
+    if (searchInput) {
+        searchInput.addEventListener('input', function () {
+            clearTimeout(searchTimer);
+            const query = this.value;
 
-        searchTimer = setTimeout(() => {
-            fetch(`{{ route('inventory.index') }}?search=${encodeURIComponent(query)}`, {
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Accept': 'application/json'
-                }
-            })
-            .then(response => {
-                if (!response.ok) throw new Error('تعذر تحميل النتائج');
-                return response.json();
-            })
-            .then(data => {
-                tableBody.innerHTML = data.html;
-            })
-            .catch(error => console.error(error));
-        }, 250);
-    });
+            searchTimer = setTimeout(() => {
+                fetch(`{{ route('inventory.index') }}?search=${encodeURIComponent(query)}`, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Accept': 'application/json'
+                    }
+                })
+                .then(response => {
+                    if (!response.ok) throw new Error('تعذر تحميل النتائج');
+                    return response.json();
+                })
+                .then(data => {
+                    if (tableBody && data.html) {
+                        tableBody.innerHTML = data.html;
+                    }
+                })
+                .catch(error => console.error(error));
+            }, 250);
+        });
+    }
 
     function openEditModal(id, number, name, quantity, price) {
         document.getElementById('edit-form').action = `/inventory/${id}`;
