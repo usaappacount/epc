@@ -45,6 +45,7 @@ RUN a2enmod rewrite
 # إعطاء صلاحيات القراءة والكتابة للمجلدات وقاعدة البيانات
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/database
 RUN chmod -R 775 storage bootstrap/cache database
+CMD php artisan config:clear && php artisan migrate --force && php artisan db:seed --force && apache2-foreground
 
 EXPOSE 80
 
