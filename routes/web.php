@@ -99,7 +99,7 @@ Route::middleware('auth')->group(function () {
         ]);
     })->name('pages.second');
 
-    // صفحة إعدادات ربط الـ API والـ Webhook (الصفحة الثالثة - موجهة لملف third مباشرة)
+    // صفحة إعدادات ربط الـ API والـ Webhook (الصفحة الثالثة - موجهة لملف third.blade.php مباشرة)
     Route::get('/page-third', function () {
         $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
         return view('third', compact('webhookLogs'));
