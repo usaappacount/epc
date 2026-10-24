@@ -46,4 +46,4 @@ RUN chmod -R 775 storage bootstrap/cache
 EXPOSE 80
 
 # أمر التشغيل النهائي لتخزين الكاش وتشغيل السيرفر
-CMD php artisan config:cache && php artisan route:cache && apache2-foreground
+CMD apache2-foreground
