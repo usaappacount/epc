@@ -46,4 +46,5 @@ RUN chmod -R 775 storage bootstrap/cache
 EXPOSE 80
 
 # أمر التشغيل النهائي لتخزين الكاش وتشغيل السيرفر
-CMD apache2-foreground
+ENV APP_KEY=base64:MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=
+CMD php artisan config:clear && apache2-foreground
