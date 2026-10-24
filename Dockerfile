@@ -9,13 +9,14 @@ RUN apt-get update && apt-get install -y \
     libxml2-dev \
     zip \
     unzip \
-    libsqlite3-dev
+    libsqlite3-dev \
+    libzip-dev
 
 # تنظيف الذاكرة المؤقتة
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# تثبيت إضافات PHP الضرورية
-RUN docker-php-ext-install pdo_sqlite mbstring exif pcntl bcmath gd
+# تثبيت إضافات PHP الضرورية (تمت إضافة zip هنا)
+RUN docker-php-ext-install pdo_sqlite mbstring exif pcntl bcmath gd zip
 
 # تحميل أداة Composer لإدارة حزم لارافيل
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
