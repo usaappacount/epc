@@ -13,23 +13,41 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Database\Schema\Blueprint;
 
-// تهيئة جداول إعدادات البوت وذاكرة المحادثة تلقائياً في حال عدم وجودها
+// تهيئة جداول إعدادات البوت العامة وإعدادات كل عميل وذاكرة المحادثة تلقائياً
 if (!Schema::hasTable('bot_settings')) {
     Schema::create('bot_settings', function (Blueprint $table) {
         $table->string('key')->primary();
         $table->text('value')->nullable();
     });
 }
+
+if (!Schema::hasTable('user_bot_settings')) {
+    Schema::create('user_bot_settings', function (Blueprint $table) {
+        $table->id();
+        $table->unsignedBigInteger('user_id')->index();
+        $table->string('key');
+        $table->text('value')->nullable();
+        $table->unique(['user_id', 'key']);
+    });
+}
+
 if (!Schema::hasTable('whatsapp_sessions')) {
     Schema::create('whatsapp_sessions', function (Blueprint $table) {
         $table->id();
-        $table->string('phone')->unique();
+        $table->unsignedBigInteger('user_id')->default(1)->index();
+        $table->string('phone')->index();
         $table->string('detected_car')->nullable();
         $table->string('detected_year')->nullable();
         $table->text('part_query')->nullable();
         $table->text('full_conversation')->nullable();
         $table->timestamps();
     });
+} elseif (!Schema::hasColumn('whatsapp_sessions', 'user_id')) {
+    try {
+        Schema::table('whatsapp_sessions', function (Blueprint $table) {
+            $table->unsignedBigInteger('user_id')->default(1)->index();
+        });
+    } catch (\Throwable $e) {}
 }
 
 Route::get('/', function () {
@@ -58,6 +76,49 @@ function formatSaudiPhoneIntl($phone) {
 }
 
 /**
+ * دالة تحويل الأرقام العربية/الفارسية إلى إنجليزية لتسهيل التعرف على السنوات والأرقام
+ */
+function normalizeArabicDigits(string $str): string {
+    $arabic = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩','۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'];
+    $english = ['0','1','2','3','4','5','6','7','8','9','0','1','2','3','4','5','6','7','8','9'];
+    return str_replace($arabic, $english, $str);
+}
+
+/**
+ * دالة التحقق مما إذا كانت سنة العميل (مثل 25 أو 2025) تقع داخل نطاق سنة الصنف (مثل 2018-2026 أو 18-25)
+ */
+function isYearMatchingItem(string $queryYear, ?string $itemYears, string $itemName): bool {
+    $qNorm = normalizeArabicDigits(trim($queryYear));
+    if (!preg_match('/^(\d{2}|\d{4})$/', $qNorm)) {
+        return true;
+    }
+    $qFull = strlen($qNorm) === 2 ? ((int)$qNorm <= 40 ? 2000 + (int)$qNorm : 1900 + (int)$qNorm) : (int)$qNorm;
+    $qShort = substr((string)$qFull, -2);
+
+    $targetText = normalizeArabicDigits(($itemYears ?? '') . ' ' . $itemName);
+
+    // 1. فحص النطاقات مثل 2018-2026 أو 18-26 أو 18/25
+    if (preg_match_all('/(\d{2,4})\s*[\/-]\s*(\d{2,4})/u', $targetText, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $y1 = strlen($m[1]) === 2 ? ((int)$m[1] <= 40 ? 2000 + (int)$m[1] : 1900 + (int)$m[1]) : (int)$m[1];
+            $y2 = strlen($m[2]) === 2 ? ((int)$m[2] <= 40 ? 2000 + (int)$m[2] : 1900 + (int)$m[2]) : (int)$m[2];
+            $start = min($y1, $y2);
+            $end   = max($y1, $y2);
+            if ($qFull >= $start && $qFull <= $end) {
+                return true;
+            }
+        }
+    }
+
+    // 2. فحص التطابق المباشر للسنة الكاملة أو المختصرة كرقم مستقل
+    if (preg_match('/(?<!\d)(' . preg_quote((string)$qFull, '/') . '|' . preg_quote($qShort, '/') . ')(?!\d)/u', $targetText)) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
  * دالة تنظيف الكلمات المفتاحية القديمة من أسماء السيارات وسنوات الصنع
  */
 function purgeCarAndYearKeywords(): void {
@@ -81,34 +142,25 @@ function purgeCarAndYearKeywords(): void {
 
     $forbiddenWords = array_unique(array_filter(array_map('mb_strtolower', $forbiddenWords)));
 
-    if (!empty($forbiddenWords)) {
-        $allKeywords = DB::table('item_keywords')->get();
-        foreach ($allKeywords as $kw) {
-            $kwLower = mb_strtolower(trim($kw->keyword));
-            $isYear = preg_match('/^(?:19|20)\d{2}$/u', $kwLower)
-                   || preg_match('/^(?:(?:19|20)?\d{2})[\/-](?:(?:19|20)?\d{2})$/u', $kwLower)
-                   || preg_match('/^\d{2,4}$/u', $kwLower);
+    $allKeywords = DB::table('item_keywords')->get();
+    foreach ($allKeywords as $kw) {
+        $kwNorm = normalizeArabicDigits(mb_strtolower(trim($kw->keyword)));
+        $isYear = preg_match('/^(?:19|20)\d{2}$/u', $kwNorm)
+               || preg_match('/^(?:(?:19|20)?\d{2})[\/-](?:(?:19|20)?\d{2})$/u', $kwNorm)
+               || preg_match('/^\d+$/u', $kwNorm);
 
-            if ($isYear || in_array($kwLower, $forbiddenWords)) {
-                DB::table('item_keywords')->where('id', $kw->id)->delete();
-            } else {
-                foreach ($forbiddenWords as $fw) {
-                    if (mb_strlen($fw) >= 3 && $kwLower === $fw) {
-                        DB::table('item_keywords')->where('id', $kw->id)->delete();
-                        break;
-                    }
-                }
-            }
+        if ($isYear || in_array($kwNorm, $forbiddenWords)) {
+            DB::table('item_keywords')->where('id', $kw->id)->delete();
         }
     }
 }
 
 /**
- * دالة التحليل والربط الذكية بقلب النظام والسيارات والسنوات (مع منع إضافة أسماء السيارات وتاريخ الصنع للكلمات المفتاحية)
+ * دالة التحليل والربط الذكية بقلب النظام والسيارات والسنوات
  */
 function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId = null): void {
     $cleanNumber = strtoupper(trim($itemNumber));
-    $cleanName = trim($itemName);
+    $cleanName = normalizeArabicDigits(trim($itemName));
 
     if ($cleanNumber === '') return;
 
@@ -140,14 +192,14 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
     $allYearWords = [];
     foreach ($patterns as $pattern) {
-        $allYearWords[] = $pattern;
-        $allYearWords = array_merge($allYearWords, preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $pattern, -1, PREG_SPLIT_NO_EMPTY));
-        if (!$detectedYears && mb_stripos($cleanName, $pattern) !== false) {
-            $detectedYears = $pattern;
+        $normP = normalizeArabicDigits($pattern);
+        $allYearWords[] = $normP;
+        $allYearWords = array_merge($allYearWords, preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $normP, -1, PREG_SPLIT_NO_EMPTY));
+        if (!$detectedYears && mb_stripos($cleanName, $normP) !== false) {
+            $detectedYears = $normP;
         }
     }
 
-    // إزالة أسماء السيارات والمرادفات وأنماط السنوات من النص قبل تقسيم الكلمات المفتاحية
     $nameForKeywords = $cleanName;
     foreach ($carsList as $car) {
         $nameForKeywords = str_ireplace($car->car_name, ' ', $nameForKeywords);
@@ -160,23 +212,24 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     }
     foreach ($patterns as $pattern) {
         if ($pattern !== '') {
-            $nameForKeywords = str_ireplace($pattern, ' ', $nameForKeywords);
+            $nameForKeywords = str_ireplace(normalizeArabicDigits($pattern), ' ', $nameForKeywords);
         }
     }
 
-    // إزالة صيغ السنوات مثل 2015-2020 أو 15-18 أو 2019 من النص المخصص للكلمات المفتاحية
+    // استخراج السنوات من اسم الصنف (مثل 2015-2020 أو 18-25 أو 2024 أو 25)
+    if (!$detectedYears) {
+        if (preg_match('/(?:(?:19|20)?\d{2})\s*[\/-]\s*(?:(?:19|20)?\d{2})/u', $cleanName, $m)) {
+            $detectedYears = str_replace(' ', '', $m[0]);
+        } elseif (preg_match('/\b(?:19\d{2}|20\d{2})\b/u', $cleanName, $m)) {
+            $detectedYears = $m[0];
+        } elseif (preg_match('/(?<!\d)\d{2}(?!\d)/u', $nameForKeywords, $m)) {
+            $detectedYears = $m[0];
+        }
+    }
+
     $nameForKeywords = preg_replace('/(?:(?:19|20)?\d{2})\s*[\/-]\s*(?:(?:19|20)?\d{2})/u', ' ', $nameForKeywords);
     $nameForKeywords = preg_replace('/\b(?:19|20)\d{2}\b/u', ' ', $nameForKeywords);
-
-    $wordsInName = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $cleanName, -1, PREG_SPLIT_NO_EMPTY);
-    if (!$detectedYears) {
-        foreach ($wordsInName as $word) {
-            if (preg_match('/^(?:(?:19|20)?\d{2})[\/-](?:(?:19|20)?\d{2})$/u', $word) || preg_match('/^\d{2}[\-\/]\d{2}$/u', $word) || preg_match('/^(?:19|20)\d{2}$/u', $word)) {
-                $detectedYears = $word;
-                break;
-            }
-        }
-    }
+    $nameForKeywords = preg_replace('/(?<!\d)\d{2}(?!\d)/u', ' ', $nameForKeywords);
 
     DB::table('items')
         ->where('item_number', $cleanNumber)
@@ -237,63 +290,198 @@ function syncAllExistingItemsToCore(): void {
 }
 
 /**
- * دالة استخراج السيارة والسنة واسم القطعة من نص رسالة العميل
+ * دالة استخراج السيارة والسنة (بما في ذلك السنوات المكونة من رقمين مثل 25 أو 2025 أو النطاقات) واسم/رقم القطعة من رسالة الزبون
  */
 function parseWhatsappText(string $text): array {
+    $normText = normalizeArabicDigits($text);
     $detectedCar = null;
+    $detectedCategory = null;
     $detectedYear = null;
-    $remainingText = $text;
+    $remainingText = $normText;
 
+    // 1. استخراج رقم القطعة إن وجد (مثل 90919-01289) لحمايته من الالتباس مع السنوات
+    $extractedPartNumbers = [];
+    if (preg_match_all('/\b[A-Za-z0-9]{4,}[\-][A-Za-z0-9\-]+\b/u', $remainingText, $pm)) {
+        foreach ($pm[0] as $partNum) {
+            $extractedPartNumbers[] = strtoupper($partNum);
+            $remainingText = str_replace($partNum, ' ', $remainingText);
+        }
+    }
+
+    // 2. البحث عن اسم السيارة أو مرادفاتها
     $carsList = DB::table('cars')->get();
     foreach ($carsList as $car) {
-        if (mb_stripos($text, $car->car_name) !== false) {
+        if (mb_stripos($remainingText, $car->car_name) !== false) {
             $detectedCar = $car->car_name;
-            $remainingText = str_ireplace($car->car_name, '', $remainingText);
+            $detectedCategory = $car->category;
+            $remainingText = str_ireplace($car->car_name, ' ', $remainingText);
             break;
         }
         $aliases = DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray();
         foreach ($aliases as $alias) {
-            if ($alias !== '' && mb_stripos($text, $alias) !== false) {
+            if ($alias !== '' && mb_stripos($remainingText, $alias) !== false) {
                 $detectedCar = $car->car_name;
-                $remainingText = str_ireplace($alias, '', $remainingText);
+                $detectedCategory = $car->category;
+                $remainingText = str_ireplace($alias, ' ', $remainingText);
                 break 2;
             }
         }
     }
 
+    // 3. البحث في أنماط السنوات المضافة في الإعدادات (سواء تطابق مباشر أو إذا أرسل العميل "25" والنمط المسجل "2025" أو "20-26")
     $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
     foreach ($patterns as $pattern) {
-        if (mb_stripos($text, $pattern) !== false) {
-            $detectedYear = $pattern;
-            $remainingText = str_ireplace($pattern, '', $remainingText);
+        $normPattern = normalizeArabicDigits(trim($pattern));
+        if ($normPattern !== '' && preg_match('/(?<!\d)' . preg_quote($normPattern, '/') . '(?!\d)/u', $remainingText)) {
+            $detectedYear = $normPattern;
+            $remainingText = preg_replace('/(?<!\d)' . preg_quote($normPattern, '/') . '(?!\d)/u', ' ', $remainingText, 1);
             break;
         }
     }
 
+    // 4. التعرف الذكي على أي سنة صنع رباعية (1980-2035) أو ثنائية (مثل 25 أو 18 أو 99) أو نطاق (18-22)
     if (!$detectedYear) {
-        if (preg_match('/\b(19\d{2}|20\d{2})\b/u', $text, $matches)) {
+        if (preg_match('/(?<!\d)((?:19|20)?\d{2}\s*[\/-]\s*(?:19|20)?\d{2})(?!\d)/u', $remainingText, $matches)) {
+            $detectedYear = str_replace(' ', '', $matches[1]);
+            $remainingText = str_replace($matches[1], ' ', $remainingText);
+        } elseif (preg_match('/(?<!\d)(19[7-9]\d|20[0-3]\d)(?!\d)/u', $remainingText, $matches)) {
             $detectedYear = $matches[1];
-            $remainingText = str_replace($matches[1], '', $remainingText);
-        } elseif (preg_match('/\b(\d{2}[\-\/]\d{2})\b/u', $text, $matches)) {
-            $detectedYear = $matches[1];
-            $remainingText = str_replace($matches[1], '', $remainingText);
+            $remainingText = preg_replace('/(?<!\d)' . preg_quote($matches[1], '/') . '(?!\d)/u', ' ', $remainingText, 1);
+        } elseif (preg_match('/(?<!\d)(\d{2})(?!\d)/u', $remainingText, $matches)) {
+            $twoDigit = (int) $matches[1];
+            // يقبل الموديلات من 70 إلى 99 (1970-1999) ومن 00 إلى 35 (2000-2035 مثل 25 لموديل 2025)
+            if ($twoDigit <= 35 || $twoDigit >= 70) {
+                $detectedYear = $matches[1];
+                $remainingText = preg_replace('/(?<!\d)' . preg_quote($matches[1], '/') . '(?!\d)/u', ' ', $remainingText, 1);
+            }
         }
     }
 
-    $stopWords = ['السلام', 'عليكم', 'ابغى', 'ابغا', 'ابي', 'عندكم', 'موجود', 'احصل', 'سيارة', 'سياره', 'موديل', 'سنة', 'سنه', 'لو', 'سمحت', 'ياغالي', 'بكم', 'هل', 'فيه', 'يتوفر'];
-    $words = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', trim($remainingText), -1, PREG_SPLIT_NO_EMPTY);
-    $cleanWords = [];
+    // 5. تنظيف الكلمات الدلالية العامة لاستخلاص اسم القطعة (ترجمة العميل)
+    $stopWords = ['السلام', 'عليكم', 'ابغى', 'ابغا', 'ابي', 'عندكم', 'موجود', 'احصل', 'سيارة', 'سياره', 'موديل', 'سنة', 'سنه', 'لو', 'سمحت', 'ياغالي', 'بكم', 'هل', 'فيه', 'يتوفر', 'السيارة', 'السياره', 'من', 'فضلك', 'مطلوب'];
+    $words = preg_split('/[\s,\+\/\(\)\*\.]+/u', trim($remainingText), -1, PREG_SPLIT_NO_EMPTY);
+    $cleanWords = $extractedPartNumbers;
     foreach ($words as $w) {
-        if (!in_array(mb_strtolower($w), $stopWords) && mb_strlen($w) >= 2) {
-            $cleanWords[] = $w;
+        $wTrim = trim($w, '- ');
+        if ($wTrim !== '' && !in_array(mb_strtolower($wTrim), $stopWords) && mb_strlen($wTrim) >= 2) {
+            $cleanWords[] = $wTrim;
         }
     }
 
     return [
-        'car'  => $detectedCar,
-        'year' => $detectedYear,
-        'part' => implode(' ', $cleanWords),
+        'car'      => $detectedCar,
+        'category' => $detectedCategory,
+        'year'     => $detectedYear,
+        'part'     => implode(' ', array_unique($cleanWords)),
     ];
+}
+
+/**
+ * دالة جلب إعدادات البوت الخاصة بعميل معين (مع القيم الافتراضية عند عدم الحفظ المسبق)
+ */
+function getUserBotSettings(int $userId): array {
+    $defaults = [
+        'reply_available'    => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالسعر: {price} ريال",
+        'reply_unavailable'  => "نعتذر منك، القطعة المطلوبة ({part}) لسيارة {car} موديل {year} غير متوفرة حالياً ❌",
+        'reply_ask_car'      => "حياك الله، فضلاً ما هو نوع أو اسم السيارة؟",
+        'reply_ask_year'     => "فضلاً كم موديل (سنة صنع) السيارة {car}؟",
+        'whatsapp_api_url'   => "",
+        'whatsapp_api_token' => "",
+        'whatsapp_session_id'=> "",
+    ];
+
+    $saved = DB::table('user_bot_settings')
+        ->where('user_id', $userId)
+        ->pluck('value', 'key')
+        ->toArray();
+
+    // في حال لم يكن لدى المستخدم إعدادات محفوظة بعد وكان هو الأدمن، نقرأ من الجدول القديم bot_settings للتوافق
+    if (empty($saved)) {
+        $legacy = DB::table('bot_settings')->pluck('value', 'key')->toArray();
+        if (!empty($legacy)) {
+            $saved = $legacy;
+        }
+    }
+
+    // ندمج بحيث إذا كان المفتاح محفوظاً (حتى لو تركه المستخدم فارغاً عن قصد '') نحتفظ بقيمته الفارغة لكي لا يرد البوت
+    $result = $defaults;
+    foreach ($saved as $k => $v) {
+        $result[$k] = (string) $v;
+    }
+
+    return $result;
+}
+
+/**
+ * دالة موحدة لاستبدال جميع الدوال والمتغيرات في أي خانة من خانات الرد الآلي
+ */
+function formatBotTemplate(string $template, array $data): string {
+    if (trim($template) === '') {
+        return '';
+    }
+
+    $replacements = [
+        '{item_name}'   => $data['item_name'] ?? '',
+        '{item_number}' => $data['item_number'] ?? '',
+        '{price}'       => $data['price'] ?? '',
+        '{quantity}'    => $data['quantity'] ?? '',
+        '{car}'         => $data['car'] ?? '',
+        '{category}'    => $data['category'] ?? '',
+        '{year}'        => $data['year'] ?? '',
+        '{part}'        => $data['part'] ?? '',
+        '{client_name}' => $data['client_name'] ?? '',
+        '{phone}'       => $data['phone'] ?? '',
+        '{items}'       => $data['items'] ?? '',
+    ];
+
+    return str_replace(array_keys($replacements), array_values($replacements), $template);
+}
+
+/**
+ * دالة تحديد صاحب حساب الواتساب (العميل أو الأدمن) بناءً على session_id أو الرابط أو التوكن القادم في الويب هوك
+ */
+function resolveWebhookOwnerUserId(Request $request, array $payload): int {
+    // 1. إذا كان الرابط يحتوي على ?user_id=X
+    if ($request->filled('user_id')) {
+        return (int) $request->query('user_id');
+    }
+
+    // 2. البحث عن طريق session_id المرسل في الويب هوك
+    $incomingSession = data_get($payload, 'session_id')
+                    ?? data_get($payload, 'sessionId')
+                    ?? data_get($payload, 'session')
+                    ?? data_get($payload, 'instance_id')
+                    ?? data_get($payload, 'instanceId')
+                    ?? data_get($payload, 'tenant_id')
+                    ?? data_get($payload, 'data.session_id')
+                    ?? data_get($payload, 'data.sessionId')
+                    ?? data_get($payload, 'data.session')
+                    ?? data_get($payload, 'data.instance_id')
+                    ?? $request->query('session_id');
+
+    if (!empty($incomingSession)) {
+        $match = DB::table('user_bot_settings')
+            ->where('key', 'whatsapp_session_id')
+            ->where('value', trim((string) $incomingSession))
+            ->first();
+        if ($match) {
+            return (int) $match->user_id;
+        }
+    }
+
+    // 3. في حال وجود مستخدم واحد فقط قام بضبط session_id أو api_url نستخدمه، وإلا نستخدم الأدمن الافتراضي
+    $firstConfigured = DB::table('user_bot_settings')
+        ->whereIn('key', ['whatsapp_session_id', 'whatsapp_api_url'])
+        ->whereNotNull('value')
+        ->where('value', '!=', '')
+        ->first();
+
+    if ($firstConfigured) {
+        return (int) $firstConfigured->user_id;
+    }
+
+    $admin = User::where('role', 'admin')->first();
+    return $admin ? $admin->id : 1;
 }
 
 function handleWebhook(Request $request) {
@@ -311,7 +499,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'pong'], 200);
     }
 
-    // تجاهل الرسائل الصادرة من البوت نفسه
     $fromMe = data_get($payload, 'data.fromMe')
            ?? data_get($payload, 'data.message.fromMe')
            ?? data_get($payload, 'data.is_from_me')
@@ -321,7 +508,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_from_me'], 200);
     }
 
-    // دعم كامل لصيغة sender_phone كما تظهر في سجلات الويب هوك (مثل 966556666037@c.us) وجميع الصيغ الأخرى
     $sender = data_get($payload, 'data.sender_phone')
            ?? data_get($payload, 'sender_phone')
            ?? data_get($payload, 'data.message.sender_phone')
@@ -334,7 +520,6 @@ function handleWebhook(Request $request) {
            ?? data_get($payload, 'data.contact.phone')
            ?? data_get($payload, 'data.key.remoteJid');
 
-    // استخراج نص الرسالة من جميع الحقول المحتملة في Payload
     $messageText = data_get($payload, 'data.message_body')
                 ?? data_get($payload, 'data.text')
                 ?? data_get($payload, 'data.body')
@@ -351,7 +536,6 @@ function handleWebhook(Request $request) {
                 ?? data_get($payload, 'text')
                 ?? data_get($payload, 'content');
 
-    // إذا كان الحقل مصفوفة، نبحث عن أول نص صالح بداخلها
     if (is_array($messageText)) {
         $messageText = $messageText['text'] ?? $messageText['body'] ?? $messageText['content'] ?? $messageText['conversation'] ?? null;
     }
@@ -369,15 +553,24 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'empty'], 200);
     }
 
-    $settings = DB::table('bot_settings')->pluck('value', 'key')->toArray();
-    $msgAskCar      = $settings['reply_ask_car'] ?? 'حياك الله، فضلاً ما هو نوع أو اسم السيارة؟';
-    $msgAskYear     = $settings['reply_ask_year'] ?? 'فضلاً كم موديل (سنة صنع) السيارة؟';
-    $msgAvailable   = $settings['reply_available'] ?? "القطعة متوفرة لدينا ✅\nتفاصيل القطعة:\n{items}";
-    $msgUnavailable = $settings['reply_unavailable'] ?? 'نعتذر منك، القطعة المطلوبة غير متوفرة حالياً في المخزون ❌';
+    // تحديد العميل (أو الأدمن) صاحب حساب الواتساب المستهدف
+    $ownerUserId = resolveWebhookOwnerUserId($request, $payload);
+    $ownerUser   = User::find($ownerUserId);
+    $settings    = getUserBotSettings($ownerUserId);
 
-    $session = DB::table('whatsapp_sessions')->where('phone', $cleanPhone)->first();
+    $msgAskCar      = trim($settings['reply_ask_car'] ?? '');
+    $msgAskYear     = trim($settings['reply_ask_year'] ?? '');
+    $msgAvailable   = trim($settings['reply_available'] ?? '');
+    $msgUnavailable = trim($settings['reply_unavailable'] ?? '');
+
+    // استرجاع ذاكرة المحادثة الخاصة بهذا الزبون لدى هذا العميل
+    $session = DB::table('whatsapp_sessions')
+        ->where('user_id', $ownerUserId)
+        ->where('phone', $cleanPhone)
+        ->first();
+
     if ($session && now()->diffInMinutes($session->updated_at) > 120) {
-        DB::table('whatsapp_sessions')->where('phone', $cleanPhone)->delete();
+        DB::table('whatsapp_sessions')->where('id', $session->id)->delete();
         $session = null;
     }
 
@@ -393,26 +586,72 @@ function handleWebhook(Request $request) {
 
     $fullConv = trim(($session->full_conversation ?? '') . ' ' . $messageText);
 
-    DB::table('whatsapp_sessions')->updateOrInsert(
-        ['phone' => $cleanPhone],
-        [
+    if ($session) {
+        DB::table('whatsapp_sessions')->where('id', $session->id)->update([
             'detected_car'      => $car,
             'detected_year'     => $year,
             'part_query'        => $part ?: $messageText,
             'full_conversation' => $fullConv,
             'updated_at'        => now(),
-            'created_at'        => $session->created_at ?? now(),
-        ]
-    );
-
-    if (!$car) {
-        $replyText = $msgAskCar;
-    } elseif (!$year) {
-        $replyText = str_replace('{car}', $car, $msgAskYear);
+        ]);
     } else {
-        $searchPart = $part ?: $fullConv;
-        $partWords = array_filter(explode(' ', $searchPart), fn($w) => mb_strlen($w) >= 2);
+        DB::table('whatsapp_sessions')->insert([
+            'user_id'           => $ownerUserId,
+            'phone'             => $cleanPhone,
+            'detected_car'      => $car,
+            'detected_year'     => $year,
+            'part_query'        => $part ?: $messageText,
+            'full_conversation' => $fullConv,
+            'created_at'        => now(),
+            'updated_at'        => now(),
+        ]);
+    }
 
+    // استخراج الفئة للسيارة إن وجدت
+    $carCategory = $parsed['category'] ?? '';
+    if (!$carCategory && $car) {
+        $carRow = DB::table('cars')->where('car_name', $car)->first();
+        $carCategory = $carRow->category ?? '';
+    }
+
+    $templateVars = [
+        'item_name'   => '',
+        'item_number' => '',
+        'price'       => '',
+        'quantity'    => '',
+        'car'         => $car ?? '',
+        'category'    => $carCategory,
+        'year'        => $year ?? '',
+        'part'        => $part ?: $messageText,
+        'client_name' => $ownerUser->name ?? '',
+        'phone'       => $cleanPhone,
+        'items'       => '',
+    ];
+
+    $replyText = '';
+
+    // 1. إذا لم يتم التعرف على السيارة
+    if (!$car) {
+        // إذا ترك العميل خانة طلب السيارة فارغة، لا يرد البوت
+        if ($msgAskCar === '') {
+            return response()->json(['status' => 'skipped_empty_ask_car_template'], 200);
+        }
+        $replyText = formatBotTemplate($msgAskCar, $templateVars);
+    }
+    // 2. إذا تم التعرف على السيارة ولم يتم التعرف على سنة الصنع
+    elseif (!$year) {
+        // إذا ترك العميل خانة طلب سنة الصنع فارغة، لا يرد البوت
+        if ($msgAskYear === '') {
+            return response()->json(['status' => 'skipped_empty_ask_year_template'], 200);
+        }
+        $replyText = formatBotTemplate($msgAskYear, $templateVars);
+    }
+    // 3. اكتملت (السيارة + سنة الصنع + اسم/ترجمة القطعة) -> البحث في مخزون العميل
+    else {
+        $searchPart = trim($part ?: '');
+        $partWords = array_values(array_filter(explode(' ', $searchPart), fn($w) => mb_strlen($w) >= 2));
+
+        // البحث في مخزون العميل صاحب الواتساب (ترجمة العميل `item_name` + نوع السيارة + سنة الصنع)
         $matchedNumbers = [];
         if (!empty($partWords)) {
             $kwQuery = DB::table('item_keywords');
@@ -422,22 +661,14 @@ function handleWebhook(Request $request) {
             $matchedNumbers = $kwQuery->pluck('item_number')->toArray();
         }
 
-        $itemsQuery = Item::where('quantity', '>', 0)
+        // جلب أصناف العميل المتوفرة للسيارة المطلوبة
+        $candidates = Item::where('user_id', $ownerUserId)
+            ->where('quantity', '>', 0)
             ->where(function ($q) use ($car) {
                 $q->where('detected_car_name', 'like', "%{$car}%")
                   ->orWhere('item_name', 'like', "%{$car}%");
-            });
-
-        $shortYear = strlen($year) === 4 ? substr($year, 2, 2) : $year;
-        $itemsQuery->where(function ($q) use ($year, $shortYear) {
-            $q->where('detected_years', 'like', "%{$year}%")
-              ->orWhere('detected_years', 'like', "%{$shortYear}%")
-              ->orWhere('item_name', 'like', "%{$year}%")
-              ->orWhere('item_name', 'like', "%{$shortYear}%");
-        });
-
-        if (!empty($partWords) || !empty($matchedNumbers)) {
-            $itemsQuery->where(function ($q) use ($partWords, $matchedNumbers) {
+            })
+            ->where(function ($q) use ($partWords, $matchedNumbers) {
                 if (!empty($matchedNumbers)) {
                     $q->orWhereIn('item_number', $matchedNumbers);
                 }
@@ -445,36 +676,57 @@ function handleWebhook(Request $request) {
                     $q->orWhere('item_name', 'like', "%{$pw}%")
                       ->orWhere('item_number', 'like', "%{$pw}%");
                 }
-            });
-        }
+            })
+            ->get();
 
-        $foundItems = $itemsQuery->take(5)->get();
+        // تصفية الأصناف بحسب مطابقة سنة الصنع (سواء كتب 25 أو 2025 أو كانت داخل نطاق مثل 2020-2026)
+        $foundItems = $candidates->filter(function ($item) use ($year) {
+            return isYearMatchingItem($year, $item->detected_years, $item->item_name);
+        })->take(5)->values();
+
+        // مسح الذاكرة بعد اكتمال الطلب
+        DB::table('whatsapp_sessions')
+            ->where('user_id', $ownerUserId)
+            ->where('phone', $cleanPhone)
+            ->delete();
 
         if ($foundItems->count() > 0) {
+            // إذا ترك العميل خانة التوفر فارغة، لا يرد البوت نهائياً
+            if ($msgAvailable === '') {
+                return response()->json(['status' => 'skipped_empty_available_template'], 200);
+            }
+
+            $firstItem = $foundItems->first();
             $itemsListText = $foundItems->map(function ($i) {
                 return "- {$i->item_name} (رقم: {$i->item_number}) | السعر: {$i->price} ريال";
             })->implode("\n");
 
-            $replyText = str_replace(
-                ['{items}', '{car}', '{year}', '{part}'],
-                [$itemsListText, $car, $year, $searchPart],
-                $msgAvailable
-            );
-        } else {
-            $replyText = str_replace(
-                ['{car}', '{year}', '{part}'],
-                [$car, $year, $searchPart],
-                $msgUnavailable
-            );
-        }
+            $templateVars['item_name']   = $firstItem->item_name;
+            $templateVars['item_number'] = $firstItem->item_number;
+            $templateVars['price']       = (string) $firstItem->price;
+            $templateVars['quantity']    = (string) $firstItem->quantity;
+            $templateVars['items']       = $itemsListText;
 
-        DB::table('whatsapp_sessions')->where('phone', $cleanPhone)->delete();
+            $replyText = formatBotTemplate($msgAvailable, $templateVars);
+        } else {
+            // إذا ترك العميل خانة عدم التوفر فارغة، لا يرد البوت نهائياً
+            if ($msgUnavailable === '') {
+                return response()->json(['status' => 'skipped_empty_unavailable_template'], 200);
+            }
+
+            $replyText = formatBotTemplate($msgUnavailable, $templateVars);
+        }
     }
 
-    // إرسال الرد عبر API الواتساب الخارجي (إذا تم إدخال رابط الإرسال في صفحة إعدادات البوت)
-    $apiUrl   = trim($settings['whatsapp_api_url'] ?? '');
-    $apiToken = trim($settings['whatsapp_api_token'] ?? '');
-    $convId   = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
+    if (trim($replyText) === '') {
+        return response()->json(['status' => 'no_reply_configured'], 200);
+    }
+
+    // إرسال الرد عبر API الواتساب الخاص بالعميل (مع تمرير session_id)
+    $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
+    $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
+    $sessionId = trim($settings['whatsapp_session_id'] ?? '');
+    $convId    = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
 
     if (!empty($apiUrl)) {
         try {
@@ -485,6 +737,10 @@ function handleWebhook(Request $request) {
             }
 
             Http::withHeaders($headers)->withoutVerifying()->timeout(10)->post($apiUrl, [
+                'session_id'      => $sessionId,
+                'sessionId'       => $sessionId,
+                'session'         => $sessionId,
+                'instance_id'     => $sessionId,
                 'token'           => $apiToken,
                 'api_key'         => $apiToken,
                 'to'              => $cleanPhone,
@@ -502,19 +758,20 @@ function handleWebhook(Request $request) {
         }
     }
 
-    // إرجاع جميع صيغ الرد المباشر في استجابة الويب هوك في حال كانت المنصة تقرأ الرد مباشرة من الاستجابة
     return response()->json([
-        'status'  => 'success',
-        'reply'   => $replyText,
-        'message' => $replyText,
-        'text'    => $replyText,
-        'body'    => $replyText,
-        'data'    => [
-            'reply'   => $replyText,
-            'message' => $replyText,
-            'text'    => $replyText,
+        'status'     => 'success',
+        'session_id' => $sessionId,
+        'reply'      => $replyText,
+        'message'    => $replyText,
+        'text'       => $replyText,
+        'body'       => $replyText,
+        'data'       => [
+            'session_id' => $sessionId,
+            'reply'      => $replyText,
+            'message'    => $replyText,
+            'text'       => $replyText,
         ],
-        'memory'  => [
+        'memory'     => [
             'car'  => $car,
             'year' => $year,
             'part' => $part,
@@ -532,7 +789,6 @@ Route::post('/login', function (Request $request) {
     $password = trim($request->input('password', ''));
     $cleanInput = preg_replace('/\D/', '', $loginInput);
 
-    // الحالة الأولى: إذا أدخل رقم جوال (10 أرقام تبدأ بـ 0)
     if (strlen($cleanInput) === 10 && str_starts_with($cleanInput, '0')) {
         $formattedTarget = formatSaudiPhoneIntl($loginInput);
         $localAlternative = $cleanInput;
@@ -549,7 +805,6 @@ Route::post('/login', function (Request $request) {
             return back()->withInput()->with('error', 'تم إيقاف حسابك مؤقتاً، يرجى التواصل مع الإدارة.');
         }
 
-        // إذا لم يدخل المستخدم كلمة المرور/الكود بعد (الخطوة الأولى: طلب الكود)
         if (empty($password)) {
             $user->otp_code = (string) random_int(1000, 9999);
             $user->save();
@@ -559,7 +814,6 @@ Route::post('/login', function (Request $request) {
                          ->with('success', $user->otp_code);
         }
 
-        // الخطوة الثانية: التحقق من كود الـ OTP المدخل
         if (!empty($user->otp_code) && hash_equals((string) $user->otp_code, (string) $password)) {
             $user->otp_code = null;
             $user->save();
@@ -574,10 +828,7 @@ Route::post('/login', function (Request $request) {
                          ->with('success', $user->otp_code)
                          ->with('error', 'كود التحقق غير صحيح. حاول مرة أخرى.');
         }
-    }
-
-    // الحالة الثانية: تسجيل دخول الإدارة (اسم المستخدم/البريد وكلمة المرور)
-    else {
+    } else {
         if (Auth::attempt(['email' => $loginInput, 'password' => $password])) {
             $request->session()->regenerate();
             return redirect()->intended('/dashboard');
@@ -595,7 +846,7 @@ Route::post('/login', function (Request $request) {
 
 Route::middleware('auth')->group(function () {
 
-    // 1. المخزون (فصل تام: مخزون العميل خاص به، ومخزون الأدمن خاص به، إلا عند استعراض الأدمن لعميل محدد عبر client_id)
+    // 1. المخزون (خاص لكل مستخدم)
     Route::prefix('inventory')->name('inventory.')->group(function () {
         Route::get('/', function (Request $request) {
             $user = auth()->user();
@@ -605,7 +856,6 @@ Route::middleware('auth')->group(function () {
                 $targetUserId = (int) $request->query('client_id');
             }
 
-            // دائماً يفلتر حسب صاحب المخزون (الأدمن يرى مخزونه الخاص فقط، والعميل يرى مخزونه الخاص فقط)
             $query = Item::where('user_id', $targetUserId);
 
             if ($request->filled('search')) {
@@ -638,19 +888,34 @@ Route::middleware('auth')->group(function () {
             ]);
 
             $userId = auth()->id();
-            $item = Item::updateOrCreate(
-                [
+            $itemNumber = strtoupper(trim($data['item_number']));
+            $itemName   = trim($data['item_name']);
+
+            $existing = DB::table('items')
+                ->where('user_id', $userId)
+                ->where('item_number', $itemNumber)
+                ->first();
+
+            if ($existing) {
+                DB::table('items')->where('id', $existing->id)->update([
+                    'item_name'  => $itemName,
+                    'quantity'   => $data['quantity'],
+                    'price'      => $data['price'],
+                    'updated_at' => now(),
+                ]);
+            } else {
+                DB::table('items')->insert([
                     'user_id'     => $userId,
-                    'item_number' => strtoupper(trim($data['item_number'])),
-                ],
-                [
-                    'item_name'   => trim($data['item_name']),
+                    'item_number' => $itemNumber,
+                    'item_name'   => $itemName,
                     'quantity'    => $data['quantity'],
                     'price'       => $data['price'],
-                ]
-            );
+                    'created_at'  => now(),
+                    'updated_at'  => now(),
+                ]);
+            }
 
-            syncItemToMasterCore($item->item_number, $item->item_name, $userId);
+            syncItemToMasterCore($itemNumber, $itemName, $userId);
 
             return back()->with('success', 'تمت إضافة الصنف بنجاح.');
         })->name('store');
@@ -948,26 +1213,54 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم الحذف.');
     })->name('year.pattern.destroy');
 
-    // 6. مسارات الرد الآلي والذكاء الاصطناعي
+    // 6. مسارات الرد الآلي والذكاء الاصطناعي (مفصولة لكل عميل على حدة)
     Route::get('/ai-whatsapp', function (Request $request) {
+        $userId = auth()->id();
         $customerMessage = (string) $request->query('message', '');
         $matchedItems = collect();
 
         if (trim($customerMessage) !== '') {
-            $matchedNumbers = DB::table('item_keywords')
-                ->where('keyword', 'like', "%{$customerMessage}%")
-                ->pluck('item_number')
-                ->toArray();
+            $parsedTest = parseWhatsappText($customerMessage);
+            $searchPart = $parsedTest['part'] ?: $customerMessage;
+            $partWords = array_values(array_filter(explode(' ', $searchPart), fn($w) => mb_strlen($w) >= 2));
 
-            $matchedItems = Item::whereIn('item_number', $matchedNumbers)
-                ->orWhere('item_number', 'like', "%{$customerMessage}%")
-                ->orWhere('item_name', 'like', "%{$customerMessage}%")
-                ->take(10)
-                ->get();
+            $query = Item::where('user_id', $userId);
+
+            if (!empty($parsedTest['car'])) {
+                $c = $parsedTest['car'];
+                $query->where(function ($q) use ($c) {
+                    $q->where('detected_car_name', 'like', "%{$c}%")
+                      ->orWhere('item_name', 'like', "%{$c}%");
+                });
+            }
+
+            if (!empty($partWords)) {
+                $query->where(function ($q) use ($partWords, $customerMessage) {
+                    $q->orWhere('item_number', 'like', "%{$customerMessage}%")
+                      ->orWhere('item_name', 'like', "%{$customerMessage}%");
+                    foreach ($partWords as $pw) {
+                        $q->orWhere('item_name', 'like', "%{$pw}%")
+                          ->orWhere('item_number', 'like', "%{$pw}%");
+                    }
+                });
+            }
+
+            $candidates = $query->take(20)->get();
+
+            if (!empty($parsedTest['year'])) {
+                $y = $parsedTest['year'];
+                $candidates = $candidates->filter(fn($i) => isYearMatchingItem($y, $i->detected_years, $i->item_name))->values();
+            }
+
+            $matchedItems = $candidates->take(10);
         }
 
-        $botSettings = DB::table('bot_settings')->pluck('value', 'key')->toArray();
-        $activeSessions = DB::table('whatsapp_sessions')->latest('updated_at')->take(15)->get();
+        $botSettings = getUserBotSettings($userId);
+        $activeSessions = DB::table('whatsapp_sessions')
+            ->where('user_id', $userId)
+            ->latest('updated_at')
+            ->take(15)
+            ->get();
 
         return view('pages.second', [
             'customerMessage' => $customerMessage,
@@ -978,6 +1271,7 @@ Route::middleware('auth')->group(function () {
     })->name('pages.second');
 
     Route::post('/ai-whatsapp/settings', function (Request $request) {
+        $userId = auth()->id();
         $fields = [
             'reply_available',
             'reply_unavailable',
@@ -985,22 +1279,26 @@ Route::middleware('auth')->group(function () {
             'reply_ask_year',
             'whatsapp_api_url',
             'whatsapp_api_token',
+            'whatsapp_session_id',
         ];
 
         foreach ($fields as $field) {
-            if ($request->has($field)) {
-                DB::table('bot_settings')->updateOrInsert(
-                    ['key' => $field],
+            if ($request->exists($field)) {
+                DB::table('user_bot_settings')->updateOrInsert(
+                    ['user_id' => $userId, 'key' => $field],
                     ['value' => trim((string) $request->input($field, ''))]
                 );
             }
         }
 
-        return back()->with('success', 'تم حفظ إعدادات الرد الآلي وقوالب الرسائل بنجاح.');
+        return back()->with('success', 'تم حفظ إعدادات الربط وقوالب الرد الآلي الخاصة بحسابك بنجاح.');
     })->name('pages.second.settings');
 
     Route::delete('/ai-whatsapp/sessions/{id}', function ($id) {
-        DB::table('whatsapp_sessions')->where('id', $id)->delete();
+        DB::table('whatsapp_sessions')
+            ->where('id', $id)
+            ->where('user_id', auth()->id())
+            ->delete();
         return back()->with('success', 'تم مسح جلسة ذاكرة العميل.');
     })->name('pages.second.session.delete');
 
@@ -1027,7 +1325,6 @@ Route::middleware('auth')->group(function () {
         $file = $request->file('backup_file');
         $targetPath = config('database.connections.sqlite.database', database_path('database.sqlite'));
 
-        // إغلاق الاتصال بقاعدة البيانات مؤقتاً واستبدالها بالملف المرفوع
         DB::disconnect('sqlite');
         copy($file->getRealPath(), $targetPath);
 
