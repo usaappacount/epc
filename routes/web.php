@@ -493,7 +493,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         foreach ($coreNounWords as $coreWord) {
             $cwNorm = normalizeArabicSpelling($coreWord);
             // معالجة جمع/مفرد شائع مثل (كرسي <-> كراسي) أو (مساعد <-> مساعدات)
-            $ variants = [$cwNorm];
+            $variants = [$cwNorm];
             if ($cwNorm === 'كراسي') $variants[] = 'كرسي';
             if ($cwNorm === 'كرسي')  $variants[] = 'كراسي';
             if ($cwNorm === 'مساعدات') $variants[] = 'مساعد';
@@ -1564,7 +1564,7 @@ Route::middleware('auth')->group(function () {
                             'item_number' => $itemNumber,
                             'item_name'   => $itemName,
                             'quantity'    => $quantity,
-                            'price'      => $price,
+                            'price'       => $price,
                             'created_at'  => now(),
                             'updated_at'  => now(),
                         ]);
