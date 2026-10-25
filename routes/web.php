@@ -522,15 +522,16 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
  */
 function getUserBotSettings(int $userId): array {
     $defaults = [
-        'reply_available'     => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالسعر: {price} ريال",
-        'reply_unavailable'   => "نعتذر منك، القطعة المطلوبة ({part}) لسيارة {car} موديل {year} غير متوفرة حالياً ❌",
-        'reply_ask_car'       => "حياك الله، فضلاً ما هو نوع أو اسم السيارة؟",
-        'reply_ask_year'      => "فضلاً كم موديل (سنة صنع) السيارة {car}؟",
-        'reply_quota_exceeded'=> "",
-        'max_queries_per_phone'=> "0",
-        'whatsapp_api_url'    => "",
-        'whatsapp_api_token'  => "",
-        'whatsapp_session_id' => "",
+        'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالسعر: {price} ريال",
+        'reply_unavailable'     => "نعتذر منك، القطعة المطلوبة ({part}) لسيارة {car} موديل {year} غير متوفرة حالياً ❌",
+        'reply_ask_car'         => "حياك الله، فضلاً ما هو نوع أو اسم السيارة؟",
+        'reply_ask_year'        => "فضلاً كم موديل (سنة صنع) السيارة {car}؟",
+        'reply_quota_exceeded'  => "",
+        'max_queries_per_phone' => "0",
+        'allow_group_replies'   => "0", // 0 = عدم القراءة أو الرد نهائياً على القروبات، 1 = تفعيل القراءة والرد في القروبات
+        'whatsapp_api_url'      => "",
+        'whatsapp_api_token'    => "",
+        'whatsapp_session_id'   => "",
     ];
 
     $saved = DB::table('user_bot_settings')
@@ -662,29 +663,129 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
 }
 
 /**
+ * دالة إرسال رمز التحقق (OTP) لتسجيل الدخول عبر الواتساب
+ */
+function sendWhatsappLoginOtp(string $phone, string $otpCode): bool {
+    $cleanPhone = normalizeWhatsappDigits($phone);
+    if ($cleanPhone === '') {
+        return false;
+    }
+
+    // البحث عن إعدادات واتساب مفعلة (نبدأ بالمدير العام ثم أي مستخدم لديه ربط واتساب فعال)
+    $admin = User::where('role', 'admin')->first();
+    $settings = $admin ? getUserBotSettings($admin->id) : [];
+
+    if (empty(trim($settings['whatsapp_api_url'] ?? ''))) {
+        $configuredUser = DB::table('user_bot_settings')
+            ->where('key', 'whatsapp_api_url')
+            ->whereNotNull('value')
+            ->where('value', '!=', '')
+            ->first();
+
+        if ($configuredUser) {
+            $settings = getUserBotSettings((int) $configuredUser->user_id);
+        }
+    }
+
+    if (empty(trim($settings['whatsapp_api_url'] ?? ''))) {
+        return false;
+    }
+
+    $message = "🔐 رمز التحقق الخاص بك لتسجيل الدخول هو: *{$otpCode}*\nيرجى عدم مشاركة هذا الرمز مع أي شخص.";
+    $jid = $cleanPhone . '@s.whatsapp.net';
+
+    sendWhatsappReplyMessage($settings, $cleanPhone, $jid, null, $message);
+    return true;
+}
+
+/**
+ * دالة فحص صارمة جداً لاكتشاف ما إذا كانت الرسالة قادمة من مجموعة (Group) أو قناة/حالة
+ */
+function detectGroupAndBroadcastStatus(array $payload): array {
+    $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
+
+    // 1. فحص القنوات والحالات (Broadcast / Status / Newsletter) -> ترفض دائماً
+    $isBroadcastOrStatus = str_contains($rawJson, '@broadcast')
+                        || str_contains($rawJson, 'status@')
+                        || str_contains($rawJson, '@newsletter');
+
+    // 2. فحص جميع الحقول المحتملة لمعرف المحادثة لاكتشاف القروب (@g.us)
+    $possibleJids = [
+        data_get($payload, 'data.chat_id'),
+        data_get($payload, 'data.chatId'),
+        data_get($payload, 'data.chat.id'),
+        data_get($payload, 'data.key.remoteJid'),
+        data_get($payload, 'data.remoteJid'),
+        data_get($payload, 'data.from'),
+        data_get($payload, 'data.to'),
+        data_get($payload, 'data.group_id'),
+        data_get($payload, 'data.groupId'),
+        data_get($payload, 'data.message.chatId'),
+        data_get($payload, 'data.message.from'),
+        data_get($payload, 'data.message.key.remoteJid'),
+        data_get($payload, 'chatId'),
+        data_get($payload, 'chat_id'),
+        data_get($payload, 'remoteJid'),
+        data_get($payload, 'from'),
+        data_get($payload, 'group_id'),
+        data_get($payload, 'groupId'),
+    ];
+
+    $groupJid = null;
+    foreach ($possibleJids as $jid) {
+        if (is_string($jid) && str_contains($jid, '@g.us')) {
+            $groupJid = $jid;
+            break;
+        }
+    }
+
+    // 3. فحص المؤشرات المنطقية وحقل participant / author (الذي لا يوجد إلا في رسائل القروبات)
+    $isGroupFlag = data_get($payload, 'data.isGroup')
+                ?? data_get($payload, 'data.is_group')
+                ?? data_get($payload, 'isGroup')
+                ?? data_get($payload, 'is_group')
+                ?? data_get($payload, 'data.message.isGroupMsg')
+                ?? data_get($payload, 'data.chat.isGroup')
+                ?? false;
+
+    $participant = data_get($payload, 'data.participant')
+                ?? data_get($payload, 'data.key.participant')
+                ?? data_get($payload, 'data.message.participant')
+                ?? data_get($payload, 'data.message.key.participant')
+                ?? data_get($payload, 'data.author')
+                ?? data_get($payload, 'data.message.author')
+                ?? data_get($payload, 'participant')
+                ?? data_get($payload, 'author');
+
+    $isGroup = ($groupJid !== null)
+            || ($isGroupFlag === true || $isGroupFlag === 'true' || $isGroupFlag === 1 || $isGroupFlag === '1')
+            || (!empty($participant))
+            || str_contains($rawJson, '@g.us');
+
+    return [
+        'is_broadcast' => $isBroadcastOrStatus,
+        'is_group'     => $isGroup,
+        'group_jid'    => $groupJid,
+    ];
+}
+
+/**
  * دالة معالجة الويب هوك الذكية:
- * 1. منع المجموعات (@g.us) والـ Broadcast نهائياً
+ * 1. فحص إعداد (allow_group_replies): إذا كان غير مفعل لا يقرأ رسائل القروبات ولا يرد لا في القروب ولا في الخاص نهائياً
  * 2. فحص حد الاستعلامات والأرقام المستثناة (Whitelist)
  * 3. الرد المباشر على أرقام الأصناف بدون طلب سيارة أو موديل
  * 4. تجاهل الرسائل العادية والتحيات مثل "السلام عليكم"
- * 5. دعم طلب أكثر من صنف في رسالة واحدة (تكرار قالب التوفر لكل صنف متوفر، وإرسال قالب عدم التوفر مرة واحدة فقط)
+ * 5. دعم طلب أكثر من صنف في رسالة واحدة
  */
 function handleWebhook(Request $request) {
     $payload = $request->all();
     $eventType = $request->input('event', data_get($payload, 'event', 'unknown'));
 
-    DB::table('webhook_logs')->insert([
-        'event_type' => $eventType,
-        'payload'    => json_encode($payload, JSON_UNESCAPED_UNICODE),
-        'created_at' => now(),
-        'updated_at' => now(),
-    ]);
-
     if ($eventType === 'test.ping') {
         return response()->json(['status' => 'pong'], 200);
     }
 
-    // 1. تجاهل الرسائل الصادرة من البوت نفسه
+    // 1. تجاهل الرسائل الصادرة من البوت نفسه فوراً
     $fromMe = data_get($payload, 'data.fromMe')
            ?? data_get($payload, 'data.message.fromMe')
            ?? data_get($payload, 'data.is_from_me')
@@ -694,18 +795,31 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_from_me'], 200);
     }
 
-    // 2. منع الرد على المجموعات (Groups) والقنوات والحالات نهائياً
-    $isGroupFlag = data_get($payload, 'data.isGroup')
-                ?? data_get($payload, 'data.is_group')
-                ?? data_get($payload, 'isGroup')
-                ?? data_get($payload, 'is_group')
-                ?? data_get($payload, 'data.message.isGroupMsg')
-                ?? data_get($payload, 'data.chat.isGroup')
-                ?? false;
+    // 2. معرفة صاحب البوت وإعداداته قبل قراءة الرسالة
+    $ownerUserId = resolveWebhookOwnerUserId($request, $payload);
+    $ownerUser   = User::find($ownerUserId);
+    $settings    = getUserBotSettings($ownerUserId);
+    $allowGroups = ($settings['allow_group_replies'] ?? '0') === '1';
 
-    if ($isGroupFlag === true || $isGroupFlag === 'true' || $isGroupFlag === 1) {
-        return response()->json(['status' => 'ignored_group_message'], 200);
+    // 3. فحص القروبات والقنوات بشكل صارم قبل استخراج رقم المرسل أو قراءة النص
+    $groupCheck = detectGroupAndBroadcastStatus($payload);
+
+    if ($groupCheck['is_broadcast']) {
+        return response()->json(['status' => 'ignored_broadcast_or_status'], 200);
     }
+
+    // إذا كانت الرسالة من قروب والخيار غير مفعل: لا نقرأ الرسالة ولا نسجلها ولا نرد على الشخص في الخاص ولا في القروب
+    if ($groupCheck['is_group'] && !$allowGroups) {
+        return response()->json(['status' => 'ignored_group_message_completely'], 200);
+    }
+
+    // تسجيل اللوق بعد التأكد من أن الرسالة مسموح بقراءتها
+    DB::table('webhook_logs')->insert([
+        'event_type' => $eventType,
+        'payload'    => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
 
     $sender = data_get($payload, 'data.sender_phone')
            ?? data_get($payload, 'sender_phone')
@@ -718,25 +832,6 @@ function handleWebhook(Request $request) {
            ?? data_get($payload, 'data.sender')
            ?? data_get($payload, 'data.contact.phone')
            ?? data_get($payload, 'data.key.remoteJid');
-
-    $chatJid = (string) (data_get($payload, 'data.chat_id')
-            ?? data_get($payload, 'data.chatId')
-            ?? data_get($payload, 'data.key.remoteJid')
-            ?? data_get($payload, 'chatId')
-            ?? $sender);
-
-    // إذا كان المعرف يحتوي على @g.us (مجموعة) أو @broadcast أو @newsletter أو هناك participant (رسالة داخل قروب) نرفض الرد فوراً
-    $participant = data_get($payload, 'data.participant') ?? data_get($payload, 'data.key.participant') ?? data_get($payload, 'participant');
-    if (
-        str_contains($chatJid, '@g.us') ||
-        str_contains((string)$sender, '@g.us') ||
-        str_contains($chatJid, '@broadcast') ||
-        str_contains($chatJid, 'status@') ||
-        str_contains($chatJid, '@newsletter') ||
-        !empty($participant)
-    ) {
-        return response()->json(['status' => 'ignored_group_or_broadcast'], 200);
-    }
 
     $messageText = data_get($payload, 'data.message_body')
                 ?? data_get($payload, 'data.text')
@@ -762,17 +857,20 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'no_message_detected'], 200);
     }
 
-    $rawSender = (string) $sender;
-    $cleanPhone = normalizeWhatsappDigits($rawSender);
+    // إذا كان الرد على القروبات مفعلاً، نوجه الرد إلى معرف القروب نفسه وليس إلى خاص العضو
+    $rawSender = ($groupCheck['is_group'] && !empty($groupCheck['group_jid']))
+               ? (string) $groupCheck['group_jid']
+               : (string) $sender;
+
+    $cleanPhone = ($groupCheck['is_group'] && !empty($groupCheck['group_jid']))
+                ? $groupCheck['group_jid']
+                : normalizeWhatsappDigits((string) $sender);
+
     $messageText = trim($messageText);
 
     if ($cleanPhone === '' || $messageText === '') {
         return response()->json(['status' => 'empty'], 200);
     }
-
-    $ownerUserId = resolveWebhookOwnerUserId($request, $payload);
-    $ownerUser   = User::find($ownerUserId);
-    $settings    = getUserBotSettings($ownerUserId);
 
     $msgAskCar        = trim($settings['reply_ask_car'] ?? '');
     $msgAskYear       = trim($settings['reply_ask_year'] ?? '');
@@ -783,15 +881,17 @@ function handleWebhook(Request $request) {
     $sessionId        = trim($settings['whatsapp_session_id'] ?? '');
     $convId           = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
 
-    // 3. التحقق من الاستثناء (Whitelist) وحد الاستعلامات المسموح لكل رقم
+    // 4. التحقق من الاستثناء (Whitelist) وحد الاستعلامات المسموح لكل رقم
+    $quotaPhoneKey = normalizeWhatsappDigits((string) $sender) ?: $cleanPhone;
+
     $isWhitelisted = DB::table('whatsapp_whitelist_phones')
         ->where('user_id', $ownerUserId)
-        ->where('phone', $cleanPhone)
+        ->where('phone', $quotaPhoneKey)
         ->exists();
 
     $quotaRecord = DB::table('whatsapp_customer_quotas')
         ->where('user_id', $ownerUserId)
-        ->where('phone', $cleanPhone)
+        ->where('phone', $quotaPhoneKey)
         ->first();
 
     $currentQueriesUsed = $quotaRecord ? (int) $quotaRecord->queries_count : 0;
@@ -800,7 +900,7 @@ function handleWebhook(Request $request) {
         if ($msgQuotaExceeded !== '') {
             $quotaReply = formatBotTemplate($msgQuotaExceeded, [
                 'client_name' => $ownerUser->name ?? '',
-                'phone'       => $cleanPhone,
+                'phone'       => $quotaPhoneKey,
             ]);
             sendWhatsappReplyMessage($settings, $cleanPhone, $rawSender, $convId, $quotaReply);
             return response()->json(['status' => 'quota_exceeded_replied', 'reply' => $quotaReply], 200);
@@ -811,7 +911,7 @@ function handleWebhook(Request $request) {
     // استرجاع جلسة الذاكرة النشطة (إن وجدت)
     $session = DB::table('whatsapp_sessions')
         ->where('user_id', $ownerUserId)
-        ->where('phone', $cleanPhone)
+        ->where('phone', $quotaPhoneKey)
         ->first();
 
     if ($session && now()->diffInMinutes($session->updated_at) > 120) {
@@ -821,7 +921,7 @@ function handleWebhook(Request $request) {
 
     $parsed = parseWhatsappText($messageText, $ownerUserId);
 
-    // 4. إذا لم تكن هناك جلسة مفتوحة، نتحقق مما إذا كانت الرسالة استعلاماً حقيقياً عن قطع غيار أم مجرد "السلام عليكم" / دردشة
+    // 5. إذا لم تكن هناك جلسة مفتوحة، نتحقق مما إذا كانت الرسالة استعلاماً حقيقياً عن قطع غيار أم مجرد "السلام عليكم" / دردشة
     if (!$session && !hasGenuinePartInquiryIntent($messageText, $parsed, $ownerUserId)) {
         return response()->json(['status' => 'ignored_non_inquiry_chat'], 200);
     }
@@ -829,7 +929,7 @@ function handleWebhook(Request $request) {
     $replyBlocks = [];
     $unavailablePartsNames = [];
 
-    // 5. الحالة الأولى: إذا كتب الزبون رقم صنف مباشر (أو عدة أرقام أصناف) ولا توجد عناصر أخرى تتطلب سيارة/سنة
+    // 6. الحالة الأولى: إذا كتب الزبون رقم صنف مباشر (أو عدة أرقام أصناف) ولا توجد عناصر أخرى تتطلب سيارة/سنة
     if (!empty($parsed['part_numbers']) && empty($parsed['parts_list']) && !$session) {
         foreach ($parsed['part_numbers'] as $pNum) {
             $item = Item::where('user_id', $ownerUserId)
@@ -852,7 +952,7 @@ function handleWebhook(Request $request) {
                         'year'        => $item->detected_years ?? '',
                         'part'        => $pNum,
                         'client_name' => $ownerUser->name ?? '',
-                        'phone'       => $cleanPhone,
+                        'phone'       => $quotaPhoneKey,
                         'items'       => "- {$item->item_name} (رقم: {$item->item_number}) | السعر: {$item->price} ريال",
                     ]);
                 }
@@ -874,14 +974,14 @@ function handleWebhook(Request $request) {
                 'year'        => '',
                 'part'        => $combinedMissing,
                 'client_name' => $ownerUser->name ?? '',
-                'phone'       => $cleanPhone,
+                'phone'       => $quotaPhoneKey,
                 'items'       => '',
             ]);
         }
 
         // زيادة عداد الاستعلامات للزبون بعد إتمام الاستعلام المباشر برقم الصنف
         DB::table('whatsapp_customer_quotas')->updateOrInsert(
-            ['user_id' => $ownerUserId, 'phone' => $cleanPhone],
+            ['user_id' => $ownerUserId, 'phone' => $quotaPhoneKey],
             [
                 'queries_count' => $currentQueriesUsed + 1,
                 'updated_at'    => now(),
@@ -906,7 +1006,7 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // 6. الحالة الثانية: استعلام بالاسم (مفرد أو متعدد الأصناف) يحتاج (القطعة + السيارة + سنة الصنع)
+    // 7. الحالة الثانية: استعلام بالاسم (مفرد أو متعدد الأصناف) يحتاج (القطعة + السيارة + سنة الصنع)
     $car  = $parsed['car']  ?: ($session->detected_car ?? null);
     $year = $parsed['year'] ?: ($session->detected_year ?? null);
 
@@ -932,7 +1032,7 @@ function handleWebhook(Request $request) {
     } else {
         DB::table('whatsapp_sessions')->insert([
             'user_id'           => $ownerUserId,
-            'phone'             => $cleanPhone,
+            'phone'             => $quotaPhoneKey,
             'detected_car'      => $car,
             'detected_year'     => $year,
             'part_query'        => $partQueryString,
@@ -960,7 +1060,7 @@ function handleWebhook(Request $request) {
         'year'        => $year ?? '',
         'part'        => $readablePartsSummary ?: $messageText,
         'client_name' => $ownerUser->name ?? '',
-        'phone'       => $cleanPhone,
+        'phone'       => $quotaPhoneKey,
         'items'       => '',
     ];
 
@@ -1005,7 +1105,7 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // 7. اكتملت البيانات (قائمة الأصناف + السيارة + سنة الصنع) -> البحث عن كل صنف على حدة
+    // 8. اكتملت البيانات (قائمة الأصناف + السيارة + سنة الصنع) -> البحث عن كل صنف على حدة
     $allMatchedItemsForSummary = collect();
 
     foreach ($mergedPartsList as $singlePartRequest) {
@@ -1087,12 +1187,12 @@ function handleWebhook(Request $request) {
     // مسح الذاكرة بعد اكتمال الطلب والرد
     DB::table('whatsapp_sessions')
         ->where('user_id', $ownerUserId)
-        ->where('phone', $cleanPhone)
+        ->where('phone', $quotaPhoneKey)
         ->delete();
 
     // زيادة عداد الاستعلامات للزبون
     DB::table('whatsapp_customer_quotas')->updateOrInsert(
-        ['user_id' => $ownerUserId, 'phone' => $cleanPhone],
+        ['user_id' => $ownerUserId, 'phone' => $quotaPhoneKey],
         [
             'queries_count' => $currentQueriesUsed + 1,
             'updated_at'    => now(),
@@ -1128,7 +1228,7 @@ Route::post('/api/webhook/receiver/', fn(Request $r) => handleWebhook($r));
 
 require __DIR__.'/auth.php';
 
-// معالجة تسجيل الدخول الموحد (إدارة أو عملاء)
+// معالجة تسجيل الدخول الموحد (إدارة أو عملاء) مع إرسال رمز التحقق عبر الواتساب
 Route::post('/login', function (Request $request) {
     $loginInput = trim($request->input('login', ''));
     $password = trim($request->input('password', ''));
@@ -1154,9 +1254,13 @@ Route::post('/login', function (Request $request) {
             $user->otp_code = (string) random_int(1000, 9999);
             $user->save();
 
+            // إرسال كود التحقق إلى واتساب العميل
+            $sentViaWhatsapp = sendWhatsappLoginOtp($user->phone ?: $loginInput, $user->otp_code);
+
             return back()->withInput()
                          ->with('phone_for_otp', $loginInput)
-                         ->with('success', $user->otp_code);
+                         ->with('whatsapp_otp_sent', $sentViaWhatsapp)
+                         ->with('success', $sentViaWhatsapp ? 'تم إرسال رمز التحقق إلى رقمك في الواتساب بنجاح.' : $user->otp_code);
         }
 
         if (!empty($user->otp_code) && hash_equals((string) $user->otp_code, (string) $password)) {
@@ -1170,7 +1274,6 @@ Route::post('/login', function (Request $request) {
         } else {
             return back()->withInput()
                          ->with('phone_for_otp', $loginInput)
-                         ->with('success', $user->otp_code)
                          ->with('error', 'كود التحقق غير صحيح. حاول مرة أخرى.');
         }
     } else {
@@ -1254,7 +1357,7 @@ Route::middleware('auth')->group(function () {
                     'item_number' => $itemNumber,
                     'item_name'   => $itemName,
                     'quantity'    => $data['quantity'],
-                    'price'       => $data['price'],
+                    'price'      => $data['price'],
                     'created_at'  => now(),
                     'updated_at'  => now(),
                 ]);
@@ -1646,12 +1749,23 @@ Route::middleware('auth')->group(function () {
             'reply_ask_year',
             'reply_quota_exceeded',
             'max_queries_per_phone',
+            'allow_group_replies',
             'whatsapp_api_url',
             'whatsapp_api_token',
             'whatsapp_session_id',
         ];
 
         foreach ($fields as $field) {
+            if ($field === 'allow_group_replies') {
+                // إذا كان الحقل Checkbox أو Select يتم حفظ 1 عند التفعيل و 0 عند عدم التفعيل
+                $val = $request->boolean('allow_group_replies') || $request->input('allow_group_replies') === '1' ? '1' : '0';
+                DB::table('user_bot_settings')->updateOrInsert(
+                    ['user_id' => $userId, 'key' => 'allow_group_replies'],
+                    ['value' => $val]
+                );
+                continue;
+            }
+
             if ($request->exists($field)) {
                 DB::table('user_bot_settings')->updateOrInsert(
                     ['user_id' => $userId, 'key' => $field],
