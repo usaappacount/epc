@@ -49,6 +49,7 @@ try {
         });
     }
 
+    // جدول عداد الاستعلامات لكل رقم واتساب لدى كل تاجر
     if (!Schema::hasTable('whatsapp_customer_quotas')) {
         Schema::create('whatsapp_customer_quotas', function (Blueprint $table) {
             $table->id();
@@ -60,6 +61,7 @@ try {
         });
     }
 
+    // جدول الأرقام المستثناة (حد مفتوح لا نهائي)
     if (!Schema::hasTable('whatsapp_whitelist_phones')) {
         Schema::create('whatsapp_whitelist_phones', function (Blueprint $table) {
             $table->id();
@@ -71,7 +73,7 @@ try {
         });
     }
 } catch (\Throwable $e) {
-    // تجاهل أخطاء قاعدة البيانات أثناء مرحلة البناء composer package:discover
+    // تجاهل أي خطأ في قاعدة البيانات أثناء بناء الحاوية في Docker
 }
 
 Route::get('/', function () {
@@ -531,7 +533,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
 }
 
 /**
- * دالة تحليل رسالة الزبون
+ * دالة تحليل رسالة الزبون واستخراج أرقام القطع والسيارة والسنة والأصناف المطلوبة
  */
 function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     $normText = normalizeArabicDigits($text);
@@ -712,7 +714,7 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
 }
 
 /**
- * دالة جلب إعدادات البوت الخاصة بعميل معين (معزولة لكل مستخدم)
+ * دالة جلب إعدادات البوت الخاصة بعميل معين
  */
 function getUserBotSettings(int $userId): array {
     $defaults = [
@@ -855,33 +857,31 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
  * - تُرسل فقط لرقم جوال العميل المسجل في حسابه وعبر إعدادات الواتساب المرتبطة بحساب هذا العميل نفسه فقط.
  */
 function sendWhatsappLoginOtp(User $user, string $otpCode): bool {
-    // منع إرسال كود تحقق للأدمن نهائياً
     if ($user->role === 'admin') {
         return false;
     }
 
-    // التأكد من الإرسال حصراً إلى رقم جوال العميل المسجل في حسابه
     $targetPhone = trim((string) $user->phone);
     $cleanPhone = normalizeWhatsappDigits($targetPhone);
     if ($cleanPhone === '') {
         return false;
     }
 
-    // جلب إعدادات الواتساب المرتبطة بحساب هذا العميل فقط (بدون استخدام إعدادات الأدمن أو أي عميل آخر)
-    $clientWhatsappSettings = DB::table('user_bot_settings')
+    // جلب إعدادات الواتساب المرتبطة بحساب هذا العميل تحديداً (بدون السقوط على إعدادات الأدمن أو غيره)
+    $clientSettings = DB::table('user_bot_settings')
         ->where('user_id', $user->id)
         ->pluck('value', 'key')
         ->toArray();
 
-    $apiUrl = trim((string) ($clientWhatsappSettings['whatsapp_api_url'] ?? ''));
+    $apiUrl = trim((string) ($clientSettings['whatsapp_api_url'] ?? ''));
     if ($apiUrl === '') {
         return false;
     }
 
     $settings = [
         'whatsapp_api_url'    => $apiUrl,
-        'whatsapp_api_token'  => trim((string) ($clientWhatsappSettings['whatsapp_api_token'] ?? '')),
-        'whatsapp_session_id' => trim((string) ($clientWhatsappSettings['whatsapp_session_id'] ?? '')),
+        'whatsapp_api_token'  => trim((string) ($clientSettings['whatsapp_api_token'] ?? '')),
+        'whatsapp_session_id' => trim((string) ($clientSettings['whatsapp_session_id'] ?? '')),
     ];
 
     $message = "🔐 رمز التحقق الخاص بك لتسجيل الدخول هو: *{$otpCode}*\nيرجى عدم مشاركة هذا الرمز مع أي شخص.";
@@ -1360,7 +1360,7 @@ Route::post('/login', function (Request $request) {
     $password = trim((string) $request->input('password', ''));
     $cleanInput = preg_replace('/\D/', '', $loginInput);
 
-    // الدخول برقم الجوال مخصص للعملاء فقط
+    // إذا كان المدخل رقم جوال سعودي يبدأ بـ 0 ويتكون من 10 أرقام
     if (strlen($cleanInput) === 10 && str_starts_with($cleanInput, '0')) {
         $formattedTarget = formatSaudiPhoneIntl($loginInput);
         $localAlternative = $cleanInput;
@@ -1374,14 +1374,14 @@ Route::post('/login', function (Request $request) {
             return back()->withInput()->with('error', 'رقم الجوال هذا غير مسجل في النظام.');
         }
 
-        // إذا كان الحساب يخص الأدمن، لا يتم إرسال كود تحقق عبر الواتساب بل يُطلب منه الدخول ببيانات الإدارة
+        // إذا كان الحساب يخص الأدمن، لا يُرسل كود تحقق نهائياً بل يتم تسجيل الدخول بكلمة المرور فقط
         if ($user->role === 'admin') {
             if (!empty($password) && Hash::check($password, $user->password)) {
                 Auth::login($user);
                 $request->session()->regenerate();
                 return redirect()->intended('/dashboard');
             }
-            return back()->withInput()->with('error', 'حساب الإدارة يسجل الدخول عبر البريد الإلكتروني/اسم المستخدم وكلمة المرور الخاصة بالإدارة.');
+            return back()->withInput()->with('error', 'حساب الإدارة يسجل الدخول عبر البريد الإلكتروني وكلمة المرور فقط (لا يتم إرسال كود تحقق للإدارة).');
         }
 
         if (!$user->is_active) {
@@ -1392,7 +1392,7 @@ Route::post('/login', function (Request $request) {
             $user->otp_code = (string) random_int(1000, 9999);
             $user->save();
 
-            // إرسال كود التحقق حصراً إلى رقم جوال العميل المسجل ومن خلال ربط الواتساب الخاص بحسابه فقط
+            // إرسال كود التحقق حصراً إلى رقم جوال العميل المسجل وعبر إعدادات الواتساب الخاصة بحسابه فقط
             $sentViaWhatsapp = sendWhatsappLoginOtp($user, $user->otp_code);
 
             return back()->withInput()
@@ -1415,7 +1415,6 @@ Route::post('/login', function (Request $request) {
                          ->with('error', 'كود التحقق غير صحيح. حاول مرة أخرى.');
         }
     } else {
-        // تسجيل دخول الإدارة (أو بالبريد الإلكتروني وكلمة المرور) بدون إرسال أي رسائل واتساب نهائياً
         if (Auth::attempt(['email' => $loginInput, 'password' => $password])) {
             $request->session()->regenerate();
             return redirect()->intended('/dashboard');
@@ -1894,6 +1893,7 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حفظ إعدادات البوت وحدود الاستعلام وقوالب الرسائل بنجاح.');
     })->name('pages.second.settings');
 
+    // إضافة رقم مستثنى (حد مفتوح لا نهائي)
     Route::post('/ai-whatsapp/whitelist', function (Request $request) {
         $userId = auth()->id();
         $rawPhone = trim((string) $request->input('phone', ''));
@@ -1920,6 +1920,7 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حذف الرقم من قائمة الاستثناء.');
     })->name('pages.second.whitelist.delete');
 
+    // تصفير عداد الاستعلامات لرقم معين أو للجميع
     Route::post('/ai-whatsapp/quotas/reset', function (Request $request) {
         $userId = auth()->id();
         if ($request->filled('quota_id')) {
