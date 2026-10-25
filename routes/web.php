@@ -126,6 +126,28 @@ function normalizeArabicDigits(string $str): string {
 }
 
 /**
+ * توحيد الحروف العربية (الألف والهمزات والتاء المربوطة والياء) لضمان دقة التطابق
+ */
+function normalizeArabicSpelling(string $str): string {
+    $str = normalizeArabicDigits(trim($str));
+    $str = str_replace(['أ', 'إ', 'آ'], 'ا', $str);
+    $str = str_replace('ة', 'ه', $str);
+    $str = str_replace('ى', 'ي', $str);
+    return mb_strtolower($str);
+}
+
+/**
+ * قائمة الكلمات الوصفية والاتجاهات التي لا تعتبر اسماً أساسياً للقطعة بمفردها
+ */
+function getPartModifierWords(): array {
+    return [
+        'يمين', 'يسار', 'امامي', 'اماميه', 'خلفي', 'خلفيه',
+        'علوي', 'علويه', 'سفلي', 'سفليه', 'داخلي', 'داخليه', 'خارجي', 'خارجيه',
+        'وسط', 'جانبي', 'جهه', 'طقم', 'حبه', 'كامل', 'اصلي', 'وكاله', 'تجاري', 'يباني', 'ياباني'
+    ];
+}
+
+/**
  * دالة التحقق مما إذا كانت سنة العميل (مثل 25 أو 2025) تقع داخل نطاق سنة الصنف (مثل 2018-2026 أو 18-25)
  */
 function isYearMatchingItem(string $queryYear, ?string $itemYears, string $itemName): bool {
@@ -328,10 +350,205 @@ function syncAllExistingItemsToCore(): void {
 }
 
 /**
+ * دالة ذكية لتوريث اسم القطعة عندما يكتب الزبون اتجاهين معطوفين
+ * مثال: ["مقص امامي يمين", "يسار"] => ["مقص امامي يمين", "مقص امامي يسار"]
+ * مثال: ["مساعد امامي", "خلفي"] => ["مساعد امامي", "مساعد خلفي"]
+ */
+function expandCompoundDirectionalRequests(array $rawParts): array {
+    $modifiers = getPartModifierWords();
+    $sideWords = ['يمين', 'يسار'];
+    $posWords  = ['امامي', 'اماميه', 'خلفي', 'خلفيه'];
+    $vertWords = ['علوي', 'علويه', 'سفلي', 'سفليه'];
+    $inOutWords= ['داخلي', 'داخليه', 'خارجي', 'خارجيه'];
+
+    $expanded = [];
+
+    foreach ($rawParts as $phrase) {
+        $phrase = trim($phrase);
+        if ($phrase === '') continue;
+
+        $words = preg_split('/\s+/u', $phrase, -1, PREG_SPLIT_NO_EMPTY);
+        $normWords = array_map('normalizeArabicSpelling', $words);
+
+        // فحص هل هذه العبارة تتكون من كلمات اتجاه فقط؟ (مثل كلمة "يسار" لوحدها، أو "خلفي يمين" لوحدها)
+        $onlyModifiers = true;
+        foreach ($normWords as $nw) {
+            if (!in_array($nw, $modifiers)) {
+                $onlyModifiers = false;
+                break;
+            }
+        }
+
+        // إذا كانت العبارة عبارة عن اتجاه فقط (مثل "يسار") ولدينا قطعة سابقة (مثل "مقص امامي يمين")
+        if ($onlyModifiers && !empty($expanded)) {
+            $prevPhrase = end($expanded);
+            $prevWords  = preg_split('/\s+/u', $prevPhrase, -1, PREG_SPLIT_NO_EMPTY);
+
+            $newPhraseWords = $prevWords;
+
+            foreach ($words as $modWord) {
+                $normMod = normalizeArabicSpelling($modWord);
+                $replaced = false;
+
+                // تحديد المجموعة المتضادة (يمين<->يسار، أمامي<->خلفي، علوي<->سفلي)
+                $oppositeGroup = [];
+                if (in_array($normMod, $sideWords))  $oppositeGroup = $sideWords;
+                elseif (in_array($normMod, $posWords))  $oppositeGroup = $posWords;
+                elseif (in_array($normMod, $vertWords)) $oppositeGroup = $vertWords;
+                elseif (in_array($normMod, $inOutWords))$oppositeGroup = $inOutWords;
+
+                if (!empty($oppositeGroup)) {
+                    foreach ($newPhraseWords as $idx => $pw) {
+                        if (in_array(normalizeArabicSpelling($pw), $oppositeGroup)) {
+                            $newPhraseWords[$idx] = $modWord;
+                            $replaced = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!$replaced) {
+                    $newPhraseWords[] = $modWord;
+                }
+            }
+
+            $expanded[] = implode(' ', $newPhraseWords);
+        } else {
+            $expanded[] = $phrase;
+        }
+    }
+
+    return array_values(array_unique($expanded));
+}
+
+/**
+ * دالة البحث الدقيق عن قطعة واحدة في المخزون:
+ * تمنع ظهور أي صنف لا يطابق الاسم الأساسي للقطعة (فلا يظهر كرسي مكينة أو ذراع دركسون عند طلب مقص!)
+ */
+function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, string $year, int $ownerUserId) {
+    $singlePartRequest = trim($singlePartRequest);
+    if ($singlePartRequest === '') {
+        return collect();
+    }
+
+    // 1. إذا كان الطلب رقم صنف مباشر
+    $directMatch = Item::where('user_id', $ownerUserId)
+        ->where('quantity', '>', 0)
+        ->where('item_number', strtoupper($singlePartRequest))
+        ->first();
+
+    if ($directMatch) {
+        return collect([$directMatch]);
+    }
+
+    // 2. تقسيم كلمات الطلب إلى: (كلمات أساسية لاسم القطعة مثل: مقص، مساعد، كرسي) و (كلمات اتجاه/وصف مثل: امامي، يمين، يسار)
+    $allWords = array_values(array_filter(preg_split('/\s+/u', $singlePartRequest), fn($w) => mb_strlen($w) >= 2));
+    $modifiersList = getPartModifierWords();
+
+    $coreNounWords = [];
+    $directionWords = [];
+
+    foreach ($allWords as $w) {
+        $normW = normalizeArabicSpelling($w);
+        if (in_array($normW, $modifiersList)) {
+            $directionWords[] = $w;
+        } else {
+            $coreNounWords[] = $w;
+        }
+    }
+
+    // إذا لم يكتب الزبون أي اسم قطعة أساسي (مثلاً كتب "امامي يمين" فقط بدون اسم قطعة)، لا نرجع أصناف عشوائية!
+    if (empty($coreNounWords)) {
+        return collect();
+    }
+
+    // 3. جلب جميع أصناف هذه السيارة المتوفرة لدى التاجر
+    $carCandidates = Item::where('user_id', $ownerUserId)
+        ->where('quantity', '>', 0)
+        ->where(function ($q) use ($car) {
+            $q->where('detected_car_name', 'like', "%{$car}%")
+              ->orWhere('item_name', 'like', "%{$car}%");
+        })
+        ->get();
+
+    // 4. فلترة صارمة: يجب أن يحتوي الصنف على جميع الكلمات الأساسية للقطعة + جميع الاتجاهات المطلوبة + سنة الصنع
+    $matched = $carCandidates->filter(function ($item) use ($coreNounWords, $directionWords, $year) {
+        // أولاً: التحقق من مطابقة سنة الصنع
+        if (!isYearMatchingItem($year, $item->detected_years, $item->item_name)) {
+            return false;
+        }
+
+        $itemNameNorm = normalizeArabicSpelling($item->item_name);
+
+        // جلب الكلمات المفتاحية المربوطة بهذا الرقم في قلب النظام (إن وجدت)
+        $itemKeywords = DB::table('item_keywords')
+            ->where('item_number', $item->item_number)
+            ->pluck('keyword')
+            ->map(fn($k) => normalizeArabicSpelling($k))
+            ->implode(' ');
+
+        $fullSearchableText = $itemNameNorm . ' ' . $itemKeywords;
+
+        // ثانياً (شرط إجباري صارم): كل كلمة أساسية في طلب الزبون (مثل "مقص" أو "بواجي") يجب أن تكون موجودة في الصنف
+        foreach ($coreNounWords as $coreWord) {
+            $cwNorm = normalizeArabicSpelling($coreWord);
+            // معالجة جمع/مفرد شائع مثل (كرسي <-> كراسي) أو (مساعد <-> مساعدات)
+            $ variants = [$cwNorm];
+            if ($cwNorm === 'كراسي') $variants[] = 'كرسي';
+            if ($cwNorm === 'كرسي')  $variants[] = 'كراسي';
+            if ($cwNorm === 'مساعدات') $variants[] = 'مساعد';
+            if ($cwNorm === 'مقصات')   $variants[] = 'مقص';
+            if ($cwNorm === 'اذرعه')   $variants[] = 'ذراع';
+
+            $foundCore = false;
+            foreach ($variants as $v) {
+                if (mb_stripos($fullSearchableText, $v) !== false) {
+                    $foundCore = true;
+                    break;
+                }
+            }
+
+            if (!$foundCore) {
+                return false;
+            }
+        }
+
+        // ثالثاً (شرط إجباري للاتجاهات): إذا حدد الزبون اتجاهاً (مثل "يمين" أو "يسار" أو "امامي")، يجب ألا نعطيه الاتجاه المعاكس!
+        foreach ($directionWords as $dirWord) {
+            $dwNorm = normalizeArabicSpelling($dirWord);
+
+            // إذا طلب "يمين" والصنف مكتوب فيه "يسار" فقط (وليس يمين) نرفضه، والعكس
+            if ($dwNorm === 'يمين' && mb_stripos($fullSearchableText, 'يمين') === false) {
+                return false;
+            }
+            if ($dwNorm === 'يسار' && mb_stripos($fullSearchableText, 'يسار') === false) {
+                return false;
+            }
+            if (in_array($dwNorm, ['امامي', 'اماميه']) && mb_stripos($fullSearchableText, 'خلفي') !== false && mb_stripos($fullSearchableText, 'امام') === false) {
+                return false;
+            }
+            if (in_array($dwNorm, ['خلفي', 'خلفيه']) && mb_stripos($fullSearchableText, 'امام') !== false && mb_stripos($fullSearchableText, 'خلف') === false) {
+                return false;
+            }
+
+            // التأكد من وجود كلمة الاتجاه في اسم الصنف إذا كان الصنف يحدد اتجاهاً
+            $dirRoot = rtrim($dwNorm, 'ه'); // مثل اماميه -> امامي
+            if (mb_stripos($fullSearchableText, $dirRoot) === false && mb_stripos($fullSearchableText, $dwNorm) === false) {
+                return false;
+            }
+        }
+
+        return true;
+    })->take(3)->values();
+
+    return $matched;
+}
+
+/**
  * دالة تحليل رسالة الزبون واستخراج:
  * 1. أرقام القطع المباشرة (part_numbers)
  * 2. السيارة وسنة الصنع
- * 3. قائمة الأصناف المطلوبة إذا طلب أكثر من صنف في رسالة واحدة (parts_list)
+ * 3. قائمة الأصناف المطلوبة مع دعم الوراثة الذكية للاتجاهات (مثل: مساعد امامي يمين و يسار)
  */
 function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     $normText = normalizeArabicDigits($text);
@@ -416,15 +633,16 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // 5. تقسيم النص المتبقي إلى طلبات متعددة (إذا فصل الزبون بين القطع بفاصلة، أو سطر جديد، أو " و "، أو "+")
-    $stopWords = ['السلام', 'عليكم', 'ورحمة', 'الله', 'وبركاته', 'مساء', 'صباح', 'الخير', 'النور', 'اهلا', 'هلا', 'حياك', 'حياكم', 'ابغى', 'ابغا', 'ابي', 'أبغى', 'أبي', 'عندكم', 'عندك', 'موجود', 'احصل', 'أحصل', 'الاقي', 'ألاقي', 'سيارة', 'سياره', 'السيارة', 'السياره', 'موديل', 'سنة', 'سنه', 'لو', 'سمحت', 'سمحتوا', 'ياغالي', 'بكم', 'هل', 'فيه', 'يتوفر', 'متوفر', 'من', 'فضلك', 'مطلوب', 'طلب', 'اريد', 'أريد', 'احتاج', 'أحتاج', 'شوف', 'لي'];
+    // 5. تقسيم النص المتبقي إلى طلبات متعددة مع معالجة حرف الواو الملتصق أو المنفصل
+    $stopWords = ['السلام', 'عليكم', 'ورحمة', 'الله', 'وبركاته', 'مساء', 'صباح', 'الخير', 'النور', 'اهلا', 'هلا', 'حياك', 'حياكم', 'ابغى', 'ابغا', 'ابي', 'أبغى', 'أبي', 'وابغا', 'وابغى', 'وابي', 'عندكم', 'عندك', 'موجود', 'احصل', 'أحصل', 'الاقي', 'ألاقي', 'سيارة', 'سياره', 'السيارة', 'السياره', 'موديل', 'سنة', 'سنه', 'لو', 'سمحت', 'سمحتوا', 'ياغالي', 'بكم', 'هل', 'فيه', 'يتوفر', 'متوفر', 'من', 'فضلك', 'مطلوب', 'طلب', 'اريد', 'أريد', 'احتاج', 'أحتاج', 'شوف', 'لي', 'كذلك', 'ايضا', 'برضه'];
+
+    $modifiersList = getPartModifierWords();
 
     // تقسيم مبدئي بالفواصل أو الأسطر أو علامة + أو " و " أو " وكذلك " أو " مع "
     $rawSegments = preg_split('/(?:[\n\r,،\+\/]+|\s+و\s+|\s+وكذلك\s+|\s+مع\s+)/u', trim($remainingText), -1, PREG_SPLIT_NO_EMPTY);
 
     $partsList = [];
     foreach ($rawSegments as $seg) {
-        // معالجة حالة التصاق حرف الواو ببداية الكلمة مثل "بواجي وفحمات وفلتر"
         $subTokens = preg_split('/\s+/u', trim($seg), -1, PREG_SPLIT_NO_EMPTY);
         $currentPhrase = [];
 
@@ -434,10 +652,15 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
                 continue;
             }
 
-            // إذا كانت الكلمة تبدأ بـ "و" وبعدها كلمة معروفة في الكلمات المفتاحية (مثل "وفحمات" أو "وردياتير")
+            // معالجة حالة التصاق حرف الواو ببداية الكلمة مثل "ويسار" أو "ويمين" أو "وفحمات"
             if (mb_strlen($tokClean) >= 4 && mb_substr($tokClean, 0, 1) === 'و') {
                 $withoutWaw = mb_substr($tokClean, 1);
-                $isKnownPart = DB::table('item_keywords')->where('keyword', 'like', "%{$withoutWaw}%")->exists();
+                $normWithoutWaw = normalizeArabicSpelling($withoutWaw);
+
+                // هل الكلمة بعد إزالة الواو هي اتجاه (مثل "يسار" في "ويسار") أو قطعة معروفة؟
+                $isDirectionWord = in_array($normWithoutWaw, $modifiersList);
+                $isKnownPart = $isDirectionWord || DB::table('item_keywords')->where('keyword', 'like', "%{$withoutWaw}%")->exists();
+
                 if ($isKnownPart && !empty($currentPhrase)) {
                     $partsList[] = implode(' ', $currentPhrase);
                     $currentPhrase = [$withoutWaw];
@@ -455,7 +678,8 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    $partsList = array_values(array_unique(array_filter($partsList)));
+    // 6. تطبيق الوراثة الذكية للاتجاهات (تحويل ["مقص امامي يمين", "يسار"] إلى ["مقص امامي يمين", "مقص امامي يسار"])
+    $partsList = expandCompoundDirectionalRequests($partsList);
 
     return [
         'part_numbers' => $extractedPartNumbers,
@@ -471,22 +695,18 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
  * دالة التحقق الذكية: هل رسالة الزبون تمثل استعلاماً حقيقياً عن قطع غيار أم مجرد تحية/دردشة؟
  */
 function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ownerUserId): bool {
-    // 1. إذا أرسل رقم صنف مباشر -> نية مؤكدة
     if (!empty($parsed['part_numbers'])) {
         return true;
     }
 
-    // 2. إذا ذكر اسم سيارة مسجلة في النظام -> نية مؤكدة
     if (!empty($parsed['car'])) {
         return true;
     }
 
-    // 3. إذا لم يتبقَّ أي كلمات للقطع بعد حذف التحيات (مثل شخص قال "السلام عليكم كيف الحال" فقط) -> تجاهل تام
     if (empty($parsed['parts_list'])) {
         return false;
     }
 
-    // 4. فحص ما إذا كانت الكلمات المكتوبة تطابق أي كلمة مفتاحية لقطعة غيار أو اسم صنف في المخزون
     foreach ($parsed['parts_list'] as $partPhrase) {
         $words = preg_split('/\s+/u', $partPhrase, -1, PREG_SPLIT_NO_EMPTY);
         foreach ($words as $w) {
@@ -506,7 +726,6 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
         }
     }
 
-    // 5. فحص وجود كلمات طلب قطع غيار صريحة مع نص القطعة
     $explicitIntentWords = ['قطعة', 'قطعه', 'قطع', 'غيار', 'ابغى', 'ابغا', 'ابي', 'أبغى', 'عندكم', 'متوفر', 'يتوفر', 'احصل', 'سعر', 'بكم', 'مطلوب'];
     foreach ($explicitIntentWords as $intentWord) {
         if (mb_stripos($messageText, $intentWord) !== false && !empty($parsed['parts_list'])) {
@@ -528,7 +747,7 @@ function getUserBotSettings(int $userId): array {
         'reply_ask_year'        => "فضلاً كم موديل (سنة صنع) السيارة {car}؟",
         'reply_quota_exceeded'  => "",
         'max_queries_per_phone' => "0",
-        'allow_group_replies'   => "0", // 0 = عدم القراءة أو الرد نهائياً على القروبات، 1 = تفعيل القراءة والرد في القروبات
+        'allow_group_replies'   => "0",
         'whatsapp_api_url'      => "",
         'whatsapp_api_token'    => "",
         'whatsapp_session_id'   => "",
@@ -671,7 +890,6 @@ function sendWhatsappLoginOtp(string $phone, string $otpCode): bool {
         return false;
     }
 
-    // البحث عن إعدادات واتساب مفعلة (نبدأ بالمدير العام ثم أي مستخدم لديه ربط واتساب فعال)
     $admin = User::where('role', 'admin')->first();
     $settings = $admin ? getUserBotSettings($admin->id) : [];
 
@@ -704,12 +922,10 @@ function sendWhatsappLoginOtp(string $phone, string $otpCode): bool {
 function detectGroupAndBroadcastStatus(array $payload): array {
     $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
 
-    // 1. فحص القنوات والحالات (Broadcast / Status / Newsletter) -> ترفض دائماً
     $isBroadcastOrStatus = str_contains($rawJson, '@broadcast')
                         || str_contains($rawJson, 'status@')
                         || str_contains($rawJson, '@newsletter');
 
-    // 2. فحص جميع الحقول المحتملة لمعرف المحادثة لاكتشاف القروب (@g.us)
     $possibleJids = [
         data_get($payload, 'data.chat_id'),
         data_get($payload, 'data.chatId'),
@@ -739,7 +955,6 @@ function detectGroupAndBroadcastStatus(array $payload): array {
         }
     }
 
-    // 3. فحص المؤشرات المنطقية وحقل participant / author (الذي لا يوجد إلا في رسائل القروبات)
     $isGroupFlag = data_get($payload, 'data.isGroup')
                 ?? data_get($payload, 'data.is_group')
                 ?? data_get($payload, 'isGroup')
@@ -770,12 +985,7 @@ function detectGroupAndBroadcastStatus(array $payload): array {
 }
 
 /**
- * دالة معالجة الويب هوك الذكية:
- * 1. فحص إعداد (allow_group_replies): إذا كان غير مفعل لا يقرأ رسائل القروبات ولا يرد لا في القروب ولا في الخاص نهائياً
- * 2. فحص حد الاستعلامات والأرقام المستثناة (Whitelist)
- * 3. الرد المباشر على أرقام الأصناف بدون طلب سيارة أو موديل
- * 4. تجاهل الرسائل العادية والتحيات مثل "السلام عليكم"
- * 5. دعم طلب أكثر من صنف في رسالة واحدة
+ * دالة معالجة الويب هوك الذكية
  */
 function handleWebhook(Request $request) {
     $payload = $request->all();
@@ -813,7 +1023,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_group_message_completely'], 200);
     }
 
-    // تسجيل اللوق بعد التأكد من أن الرسالة مسموح بقراءتها
     DB::table('webhook_logs')->insert([
         'event_type' => $eventType,
         'payload'    => json_encode($payload, JSON_UNESCAPED_UNICODE),
@@ -857,7 +1066,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'no_message_detected'], 200);
     }
 
-    // إذا كان الرد على القروبات مفعلاً، نوجه الرد إلى معرف القروب نفسه وليس إلى خاص العضو
     $rawSender = ($groupCheck['is_group'] && !empty($groupCheck['group_jid']))
                ? (string) $groupCheck['group_jid']
                : (string) $sender;
@@ -921,7 +1129,7 @@ function handleWebhook(Request $request) {
 
     $parsed = parseWhatsappText($messageText, $ownerUserId);
 
-    // 5. إذا لم تكن هناك جلسة مفتوحة، نتحقق مما إذا كانت الرسالة استعلاماً حقيقياً عن قطع غيار أم مجرد "السلام عليكم" / دردشة
+    // 5. إذا لم تكن هناك جلسة مفتوحة، نتحقق مما إذا كانت الرسالة استعلاماً حقيقياً عن قطع غيار أم مجرد تحية/دردشة
     if (!$session && !hasGenuinePartInquiryIntent($messageText, $parsed, $ownerUserId)) {
         return response()->json(['status' => 'ignored_non_inquiry_chat'], 200);
     }
@@ -961,7 +1169,6 @@ function handleWebhook(Request $request) {
             }
         }
 
-        // عدم تكرار رسالة غير المتوفر: ترسل مرة واحدة فقط لجميع الأرقام غير المتوفرة
         if (!empty($unavailablePartsNames) && $msgUnavailable !== '') {
             $combinedMissing = implode(' ، ', array_unique($unavailablePartsNames));
             $replyBlocks[] = formatBotTemplate($msgUnavailable, [
@@ -979,7 +1186,6 @@ function handleWebhook(Request $request) {
             ]);
         }
 
-        // زيادة عداد الاستعلامات للزبون بعد إتمام الاستعلام المباشر برقم الصنف
         DB::table('whatsapp_customer_quotas')->updateOrInsert(
             ['user_id' => $ownerUserId, 'phone' => $quotaPhoneKey],
             [
@@ -1010,13 +1216,12 @@ function handleWebhook(Request $request) {
     $car  = $parsed['car']  ?: ($session->detected_car ?? null);
     $year = $parsed['year'] ?: ($session->detected_year ?? null);
 
-    // دمج قائمة الأصناف الجديدة مع المحفوظة في الذاكرة (مفصولة بـ |)
     $existingParts = [];
     if (!empty($session->part_query)) {
         $existingParts = array_values(array_filter(array_map('trim', explode('|', $session->part_query))));
     }
     $newParts = array_merge($parsed['part_numbers'], $parsed['parts_list']);
-    $mergedPartsList = array_values(array_unique(array_merge($existingParts, $newParts)));
+    $mergedPartsList = expandCompoundDirectionalRequests(array_values(array_unique(array_merge($existingParts, $newParts))));
     $partQueryString = implode(' | ', $mergedPartsList);
 
     $fullConv = trim(($session->full_conversation ?? '') . ' ' . $messageText);
@@ -1064,7 +1269,6 @@ function handleWebhook(Request $request) {
         'items'       => '',
     ];
 
-    // إذا لم يذكر الزبون أي اسم قطعة بعد (مثلاً كتب "كامري 2025" فقط)، ننتظر منه كتابة اسم القطعة دون إزعاجه
     if (empty($mergedPartsList)) {
         return response()->json(['status' => 'waiting_for_part_name_in_memory'], 200);
     }
@@ -1105,66 +1309,23 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // 8. اكتملت البيانات (قائمة الأصناف + السيارة + سنة الصنع) -> البحث عن كل صنف على حدة
-    $allMatchedItemsForSummary = collect();
-
+    // 8. اكتملت البيانات (قائمة الأصناف + السيارة + سنة الصنع) -> البحث الدقيق عن كل صنف على حدة
     foreach ($mergedPartsList as $singlePartRequest) {
         $singlePartRequest = trim($singlePartRequest);
         if ($singlePartRequest === '') continue;
 
-        // إذا كان أحد الطلبات رقم صنف مباشر
-        $directMatch = Item::where('user_id', $ownerUserId)
-            ->where('quantity', '>', 0)
-            ->where('item_number', strtoupper($singlePartRequest))
-            ->first();
-
-        if ($directMatch) {
-            $foundForThisPart = collect([$directMatch]);
-        } else {
-            $partWords = array_values(array_filter(explode(' ', $singlePartRequest), fn($w) => mb_strlen($w) >= 2));
-
-            $matchedNumbers = [];
-            if (!empty($partWords)) {
-                $kwQuery = DB::table('item_keywords');
-                foreach ($partWords as $pw) {
-                    $kwQuery->orWhere('keyword', 'like', "%{$pw}%");
-                }
-                $matchedNumbers = $kwQuery->pluck('item_number')->toArray();
-            }
-
-            $candidates = Item::where('user_id', $ownerUserId)
-                ->where('quantity', '>', 0)
-                ->where(function ($q) use ($car) {
-                    $q->where('detected_car_name', 'like', "%{$car}%")
-                      ->orWhere('item_name', 'like', "%{$car}%");
-                })
-                ->where(function ($q) use ($partWords, $matchedNumbers) {
-                    if (!empty($matchedNumbers)) {
-                        $q->orWhereIn('item_number', $matchedNumbers);
-                    }
-                    foreach ($partWords as $pw) {
-                        $q->orWhere('item_name', 'like', "%{$pw}%")
-                          ->orWhere('item_number', 'like', "%{$pw}%");
-                    }
-                })
-                ->get();
-
-            $foundForThisPart = $candidates->filter(function ($item) use ($year) {
-                return isYearMatchingItem($year, $item->detected_years, $item->item_name);
-            })->take(3)->values();
-        }
+        $foundForThisPart = findMatchingItemsForSinglePart($singlePartRequest, $car, $year, $ownerUserId);
 
         if ($foundForThisPart->count() > 0) {
             foreach ($foundForThisPart as $matchedItem) {
-                $allMatchedItemsForSummary->push($matchedItem);
                 if ($msgAvailable !== '') {
                     $itemVars = $baseTemplateVars;
                     $itemVars['item_name']   = $matchedItem->item_name;
                     $itemVars['item_number'] = $matchedItem->item_number;
                     $itemVars['price']       = (string) $matchedItem->price;
-                    $itemVars['quantity']    = (string) $matchedItem->quantity;
+                    $itemVars['quantity']    => (string) $matchedItem->quantity;
                     $itemVars['part']        = $singlePartRequest;
-                    $itemVars['items']       = "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
+                    $itemVars['items']       => "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
 
                     // تكرار قالب التوفر لكل صنف متوفر تحت بعضه
                     $replyBlocks[] = formatBotTemplate($msgAvailable, $itemVars);
@@ -1175,7 +1336,7 @@ function handleWebhook(Request $request) {
         }
     }
 
-    // إرسال رد عدم التوفر مرة واحدة فقط في نهاية الرسالة بدون تكرار
+    // إرسال رد عدم التوفر مرة واحدة فقط في نهاية الرسالة بدون تكرار للأصناف غير الموجودة
     if (!empty($unavailablePartsNames) && $msgUnavailable !== '') {
         $missingSummary = implode(' ، ', array_unique($unavailablePartsNames));
         $unavailVars = $baseTemplateVars;
@@ -1403,7 +1564,7 @@ Route::middleware('auth')->group(function () {
                             'item_number' => $itemNumber,
                             'item_name'   => $itemName,
                             'quantity'    => $quantity,
-                            'price'       => $price,
+                            'price'      => $price,
                             'created_at'  => now(),
                             'updated_at'  => now(),
                         ]);
@@ -1661,7 +1822,7 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم الحذف.');
     })->name('year.pattern.destroy');
 
-    // 6. مسارات الرد الآلي والذكاء الاصطناعي والحدود والاستثناءات
+    // 6. مسارات الرد الآلي والذكاء الاصطناعي والحدود والاستثناءات (مع تطبيق نفس البحث الدقيق في شاشة التجربة)
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId = auth()->id();
         $customerMessage = (string) $request->query('message', '');
@@ -1676,39 +1837,17 @@ Route::middleware('auth')->group(function () {
                     ->get();
             }
 
-            if ($matchedItems->isEmpty()) {
-                $searchPart = implode(' ', $parsedTest['parts_list']) ?: $customerMessage;
-                $partWords = array_values(array_filter(explode(' ', $searchPart), fn($w) => mb_strlen($w) >= 2));
+            if ($matchedItems->isEmpty() && !empty($parsedTest['parts_list'])) {
+                $testCar  = $parsedTest['car'] ?? '';
+                $testYear = $parsedTest['year'] ?? '';
 
-                $query = Item::where('user_id', $userId);
-
-                if (!empty($parsedTest['car'])) {
-                    $c = $parsedTest['car'];
-                    $query->where(function ($q) use ($c) {
-                        $q->where('detected_car_name', 'like', "%{$c}%")
-                          ->orWhere('item_name', 'like', "%{$c}%");
-                    });
+                foreach ($parsedTest['parts_list'] as $singleReq) {
+                    $found = findMatchingItemsForSinglePart($singleReq, $testCar, $testYear, $userId);
+                    foreach ($found as $fItem) {
+                        $matchedItems->push($fItem);
+                    }
                 }
-
-                if (!empty($partWords)) {
-                    $query->where(function ($q) use ($partWords, $customerMessage) {
-                        $q->orWhere('item_number', 'like', "%{$customerMessage}%")
-                          ->orWhere('item_name', 'like', "%{$customerMessage}%");
-                        foreach ($partWords as $pw) {
-                            $q->orWhere('item_name', 'like', "%{$pw}%")
-                              ->orWhere('item_number', 'like', "%{$pw}%");
-                        }
-                    });
-                }
-
-                $candidates = $query->take(20)->get();
-
-                if (!empty($parsedTest['year'])) {
-                    $y = $parsedTest['year'];
-                    $candidates = $candidates->filter(fn($i) => isYearMatchingItem($y, $i->detected_years, $i->item_name))->values();
-                }
-
-                $matchedItems = $candidates->take(10);
+                $matchedItems = $matchedItems->unique('id')->values();
             }
         }
 
@@ -1757,7 +1896,6 @@ Route::middleware('auth')->group(function () {
 
         foreach ($fields as $field) {
             if ($field === 'allow_group_replies') {
-                // إذا كان الحقل Checkbox أو Select يتم حفظ 1 عند التفعيل و 0 عند عدم التفعيل
                 $val = $request->boolean('allow_group_replies') || $request->input('allow_group_replies') === '1' ? '1' : '0';
                 DB::table('user_bot_settings')->updateOrInsert(
                     ['user_id' => $userId, 'key' => 'allow_group_replies'],
