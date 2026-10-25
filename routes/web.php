@@ -1286,9 +1286,9 @@ function handleWebhook(Request $request) {
                     $itemVars['item_name']   = $matchedItem->item_name;
                     $itemVars['item_number'] = $matchedItem->item_number;
                     $itemVars['price']       = (string) $matchedItem->price;
-                    $itemVars['quantity']    => (string) $matchedItem->quantity;
+                    $itemVars['quantity']    = (string) $matchedItem->quantity;
                     $itemVars['part']        = $singlePartRequest;
-                    $itemVars['items']       => "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
+                    $itemVars['items']       = "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
 
                     $replyBlocks[] = formatBotTemplate($msgAvailable, $itemVars);
                 }
