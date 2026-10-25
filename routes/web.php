@@ -14,64 +14,64 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Database\Schema\Blueprint;
 
 // تهيئة جداول إعدادات البوت العامة وإعدادات كل عميل وذاكرة المحادثة والحدود والاستثناءات تلقائياً
-if (!Schema::hasTable('bot_settings')) {
-    Schema::create('bot_settings', function (Blueprint $table) {
-        $table->string('key')->primary();
-        $table->text('value')->nullable();
-    });
-}
+try {
+    if (!Schema::hasTable('bot_settings')) {
+        Schema::create('bot_settings', function (Blueprint $table) {
+            $table->string('key')->primary();
+            $table->text('value')->nullable();
+        });
+    }
 
-if (!Schema::hasTable('user_bot_settings')) {
-    Schema::create('user_bot_settings', function (Blueprint $table) {
-        $table->id();
-        $table->unsignedBigInteger('user_id')->index();
-        $table->string('key');
-        $table->text('value')->nullable();
-        $table->unique(['user_id', 'key']);
-    });
-}
+    if (!Schema::hasTable('user_bot_settings')) {
+        Schema::create('user_bot_settings', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->index();
+            $table->string('key');
+            $table->text('value')->nullable();
+            $table->unique(['user_id', 'key']);
+        });
+    }
 
-if (!Schema::hasTable('whatsapp_sessions')) {
-    Schema::create('whatsapp_sessions', function (Blueprint $table) {
-        $table->id();
-        $table->unsignedBigInteger('user_id')->default(1)->index();
-        $table->string('phone')->index();
-        $table->string('detected_car')->nullable();
-        $table->string('detected_year')->nullable();
-        $table->text('part_query')->nullable();
-        $table->text('full_conversation')->nullable();
-        $table->timestamps();
-    });
-} elseif (!Schema::hasColumn('whatsapp_sessions', 'user_id')) {
-    try {
+    if (!Schema::hasTable('whatsapp_sessions')) {
+        Schema::create('whatsapp_sessions', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->default(1)->index();
+            $table->string('phone')->index();
+            $table->string('detected_car')->nullable();
+            $table->string('detected_year')->nullable();
+            $table->text('part_query')->nullable();
+            $table->text('full_conversation')->nullable();
+            $table->timestamps();
+        });
+    } elseif (!Schema::hasColumn('whatsapp_sessions', 'user_id')) {
         Schema::table('whatsapp_sessions', function (Blueprint $table) {
             $table->unsignedBigInteger('user_id')->default(1)->index();
         });
-    } catch (\Throwable $e) {}
-}
+    }
 
-// جدول عداد الاستعلامات لكل رقم واتساب لدى كل تاجر
-if (!Schema::hasTable('whatsapp_customer_quotas')) {
-    Schema::create('whatsapp_customer_quotas', function (Blueprint $table) {
-        $table->id();
-        $table->unsignedBigInteger('user_id')->default(1)->index();
-        $table->string('phone')->index();
-        $table->integer('queries_count')->default(0);
-        $table->timestamps();
-        $table->unique(['user_id', 'phone']);
-    });
-}
+    if (!Schema::hasTable('whatsapp_customer_quotas')) {
+        Schema::create('whatsapp_customer_quotas', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->default(1)->index();
+            $table->string('phone')->index();
+            $table->integer('queries_count')->default(0);
+            $table->timestamps();
+            $table->unique(['user_id', 'phone']);
+        });
+    }
 
-// جدول الأرقام المستثناة (حد مفتوح لا نهائي)
-if (!Schema::hasTable('whatsapp_whitelist_phones')) {
-    Schema::create('whatsapp_whitelist_phones', function (Blueprint $table) {
-        $table->id();
-        $table->unsignedBigInteger('user_id')->default(1)->index();
-        $table->string('phone')->index();
-        $table->string('label')->nullable();
-        $table->timestamps();
-        $table->unique(['user_id', 'phone']);
-    });
+    if (!Schema::hasTable('whatsapp_whitelist_phones')) {
+        Schema::create('whatsapp_whitelist_phones', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->default(1)->index();
+            $table->string('phone')->index();
+            $table->string('label')->nullable();
+            $table->timestamps();
+            $table->unique(['user_id', 'phone']);
+        });
+    }
+} catch (\Throwable $e) {
+    // تجاهل أخطاء قاعدة البيانات أثناء مرحلة البناء composer package:discover
 }
 
 Route::get('/', function () {
@@ -86,7 +86,7 @@ Route::get('/dashboard', function () {
  * دالة لتنسيق رقم الجوال بالصيغة الدولية الموحدة +966
  */
 function formatSaudiPhoneIntl($phone) {
-    $digits = preg_replace('/\D/', '', $phone);
+    $digits = preg_replace('/\D/', '', (string) $phone);
     if (str_starts_with($digits, '966')) {
         $digits = substr($digits, 3);
     }
@@ -351,8 +351,6 @@ function syncAllExistingItemsToCore(): void {
 
 /**
  * دالة ذكية لتوريث اسم القطعة عندما يكتب الزبون اتجاهين معطوفين
- * مثال: ["مقص امامي يمين", "يسار"] => ["مقص امامي يمين", "مقص امامي يسار"]
- * مثال: ["مساعد امامي", "خلفي"] => ["مساعد امامي", "مساعد خلفي"]
  */
 function expandCompoundDirectionalRequests(array $rawParts): array {
     $modifiers = getPartModifierWords();
@@ -370,7 +368,6 @@ function expandCompoundDirectionalRequests(array $rawParts): array {
         $words = preg_split('/\s+/u', $phrase, -1, PREG_SPLIT_NO_EMPTY);
         $normWords = array_map('normalizeArabicSpelling', $words);
 
-        // فحص هل هذه العبارة تتكون من كلمات اتجاه فقط؟ (مثل كلمة "يسار" لوحدها، أو "خلفي يمين" لوحدها)
         $onlyModifiers = true;
         foreach ($normWords as $nw) {
             if (!in_array($nw, $modifiers)) {
@@ -379,7 +376,6 @@ function expandCompoundDirectionalRequests(array $rawParts): array {
             }
         }
 
-        // إذا كانت العبارة عبارة عن اتجاه فقط (مثل "يسار") ولدينا قطعة سابقة (مثل "مقص امامي يمين")
         if ($onlyModifiers && !empty($expanded)) {
             $prevPhrase = end($expanded);
             $prevWords  = preg_split('/\s+/u', $prevPhrase, -1, PREG_SPLIT_NO_EMPTY);
@@ -390,7 +386,6 @@ function expandCompoundDirectionalRequests(array $rawParts): array {
                 $normMod = normalizeArabicSpelling($modWord);
                 $replaced = false;
 
-                // تحديد المجموعة المتضادة (يمين<->يسار، أمامي<->خلفي، علوي<->سفلي)
                 $oppositeGroup = [];
                 if (in_array($normMod, $sideWords))  $oppositeGroup = $sideWords;
                 elseif (in_array($normMod, $posWords))  $oppositeGroup = $posWords;
@@ -422,8 +417,7 @@ function expandCompoundDirectionalRequests(array $rawParts): array {
 }
 
 /**
- * دالة البحث الدقيق عن قطعة واحدة في المخزون:
- * تمنع ظهور أي صنف لا يطابق الاسم الأساسي للقطعة (فلا يظهر كرسي مكينة أو ذراع دركسون عند طلب مقص!)
+ * دالة البحث الدقيق عن قطعة واحدة في المخزون
  */
 function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, string $year, int $ownerUserId) {
     $singlePartRequest = trim($singlePartRequest);
@@ -431,7 +425,6 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         return collect();
     }
 
-    // 1. إذا كان الطلب رقم صنف مباشر
     $directMatch = Item::where('user_id', $ownerUserId)
         ->where('quantity', '>', 0)
         ->where('item_number', strtoupper($singlePartRequest))
@@ -441,8 +434,9 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         return collect([$directMatch]);
     }
 
-    // 2. تقسيم كلمات الطلب إلى: (كلمات أساسية لاسم القطعة مثل: مقص، مساعد، كرسي) و (كلمات اتجاه/وصف مثل: امامي، يمين، يسار)
-    $allWords = array_values(array_filter(preg_split('/\s+/u', $singlePartRequest), fn($w) => mb_strlen($w) >= 2));
+    $allWords = array_values(array_filter(preg_split('/\s+/u', $singlePartRequest), function ($w) {
+        return mb_strlen($w) >= 2;
+    }));
     $modifiersList = getPartModifierWords();
 
     $coreNounWords = [];
@@ -457,12 +451,10 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         }
     }
 
-    // إذا لم يكتب الزبون أي اسم قطعة أساسي (مثلاً كتب "امامي يمين" فقط بدون اسم قطعة)، لا نرجع أصناف عشوائية!
     if (empty($coreNounWords)) {
         return collect();
     }
 
-    // 3. جلب جميع أصناف هذه السيارة المتوفرة لدى التاجر
     $carCandidates = Item::where('user_id', $ownerUserId)
         ->where('quantity', '>', 0)
         ->where(function ($q) use ($car) {
@@ -471,28 +463,25 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         })
         ->get();
 
-    // 4. فلترة صارمة: يجب أن يحتوي الصنف على جميع الكلمات الأساسية للقطعة + جميع الاتجاهات المطلوبة + سنة الصنع
     $matched = $carCandidates->filter(function ($item) use ($coreNounWords, $directionWords, $year) {
-        // أولاً: التحقق من مطابقة سنة الصنع
         if (!isYearMatchingItem($year, $item->detected_years, $item->item_name)) {
             return false;
         }
 
         $itemNameNorm = normalizeArabicSpelling($item->item_name);
 
-        // جلب الكلمات المفتاحية المربوطة بهذا الرقم في قلب النظام (إن وجدت)
         $itemKeywords = DB::table('item_keywords')
             ->where('item_number', $item->item_number)
             ->pluck('keyword')
-            ->map(fn($k) => normalizeArabicSpelling($k))
+            ->map(function ($k) {
+                return normalizeArabicSpelling($k);
+            })
             ->implode(' ');
 
         $fullSearchableText = $itemNameNorm . ' ' . $itemKeywords;
 
-        // ثانياً (شرط إجباري صارم): كل كلمة أساسية في طلب الزبون (مثل "مقص" أو "بواجي") يجب أن تكون موجودة في الصنف
         foreach ($coreNounWords as $coreWord) {
             $cwNorm = normalizeArabicSpelling($coreWord);
-            // معالجة جمع/مفرد شائع مثل (كرسي <-> كراسي) أو (مساعد <-> مساعدات)
             $variants = [$cwNorm];
             if ($cwNorm === 'كراسي') $variants[] = 'كرسي';
             if ($cwNorm === 'كرسي')  $variants[] = 'كراسي';
@@ -513,11 +502,9 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             }
         }
 
-        // ثالثاً (شرط إجباري للاتجاهات): إذا حدد الزبون اتجاهاً (مثل "يمين" أو "يسار" أو "امامي")، يجب ألا نعطيه الاتجاه المعاكس!
         foreach ($directionWords as $dirWord) {
             $dwNorm = normalizeArabicSpelling($dirWord);
 
-            // إذا طلب "يمين" والصنف مكتوب فيه "يسار" فقط (وليس يمين) نرفضه، والعكس
             if ($dwNorm === 'يمين' && mb_stripos($fullSearchableText, 'يمين') === false) {
                 return false;
             }
@@ -531,8 +518,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
                 return false;
             }
 
-            // التأكد من وجود كلمة الاتجاه في اسم الصنف إذا كان الصنف يحدد اتجاهاً
-            $dirRoot = rtrim($dwNorm, 'ه'); // مثل اماميه -> امامي
+            $dirRoot = rtrim($dwNorm, 'ه');
             if (mb_stripos($fullSearchableText, $dirRoot) === false && mb_stripos($fullSearchableText, $dwNorm) === false) {
                 return false;
             }
@@ -545,10 +531,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
 }
 
 /**
- * دالة تحليل رسالة الزبون واستخراج:
- * 1. أرقام القطع المباشرة (part_numbers)
- * 2. السيارة وسنة الصنع
- * 3. قائمة الأصناف المطلوبة مع دعم الوراثة الذكية للاتجاهات (مثل: مساعد امامي يمين و يسار)
+ * دالة تحليل رسالة الزبون
  */
 function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     $normText = normalizeArabicDigits($text);
@@ -557,7 +540,6 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     $detectedYear = null;
     $remainingText = $normText;
 
-    // 1. استخراج أرقام الأصناف المباشرة (مثل 90919-01289 أو أرقام أصناف مطابقة للمخزون)
     $extractedPartNumbers = [];
     if (preg_match_all('/\b[A-Za-z0-9]{3,}[\-][A-Za-z0-9\-]{2,}\b/u', $remainingText, $pm)) {
         foreach ($pm[0] as $partNum) {
@@ -568,13 +550,14 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // فحص ما إذا كانت هناك كلمة تطابق رقم صنف مباشر في مخزون التاجر (بدون شرطة مثلاً)
     $tokens = preg_split('/[\s,،\n\r]+/u', trim($remainingText), -1, PREG_SPLIT_NO_EMPTY);
     foreach ($tokens as $tk) {
         $cleanTk = strtoupper(trim($tk));
         if (strlen($cleanTk) >= 5 && preg_match('/[0-9]/', $cleanTk)) {
             $existsAsNumber = DB::table('items')
-                ->when($ownerUserId, fn($q) => $q->where('user_id', $ownerUserId))
+                ->when($ownerUserId, function ($q) use ($ownerUserId) {
+                    return $q->where('user_id', $ownerUserId);
+                })
                 ->where('item_number', $cleanTk)
                 ->exists();
             if ($existsAsNumber) {
@@ -585,7 +568,6 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     }
     $extractedPartNumbers = array_values(array_unique($extractedPartNumbers));
 
-    // 2. البحث عن اسم السيارة أو مرادفاتها
     $carsList = DB::table('cars')->get();
     foreach ($carsList as $car) {
         if (mb_stripos($remainingText, $car->car_name) !== false) {
@@ -605,7 +587,6 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // 3. البحث في أنماط السنوات المضافة في الإعدادات
     $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
     foreach ($patterns as $pattern) {
         $normPattern = normalizeArabicDigits(trim($pattern));
@@ -616,7 +597,6 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // 4. التعرف الذكي على سنة الصنع (رباعية 2025 أو ثنائية 25 أو نطاق 18-22)
     if (!$detectedYear) {
         if (preg_match('/(?<!\d)((?:19|20)?\d{2}\s*[\/-]\s*(?:19|20)?\d{2})(?!\d)/u', $remainingText, $matches)) {
             $detectedYear = str_replace(' ', '', $matches[1]);
@@ -633,12 +613,10 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // 5. تقسيم النص المتبقي إلى طلبات متعددة مع معالجة حرف الواو الملتصق أو المنفصل
     $stopWords = ['السلام', 'عليكم', 'ورحمة', 'الله', 'وبركاته', 'مساء', 'صباح', 'الخير', 'النور', 'اهلا', 'هلا', 'حياك', 'حياكم', 'ابغى', 'ابغا', 'ابي', 'أبغى', 'أبي', 'وابغا', 'وابغى', 'وابي', 'عندكم', 'عندك', 'موجود', 'احصل', 'أحصل', 'الاقي', 'ألاقي', 'سيارة', 'سياره', 'السيارة', 'السياره', 'موديل', 'سنة', 'سنه', 'لو', 'سمحت', 'سمحتوا', 'ياغالي', 'بكم', 'هل', 'فيه', 'يتوفر', 'متوفر', 'من', 'فضلك', 'مطلوب', 'طلب', 'اريد', 'أريد', 'احتاج', 'أحتاج', 'شوف', 'لي', 'كذلك', 'ايضا', 'برضه'];
 
     $modifiersList = getPartModifierWords();
 
-    // تقسيم مبدئي بالفواصل أو الأسطر أو علامة + أو " و " أو " وكذلك " أو " مع "
     $rawSegments = preg_split('/(?:[\n\r,،\+\/]+|\s+و\s+|\s+وكذلك\s+|\s+مع\s+)/u', trim($remainingText), -1, PREG_SPLIT_NO_EMPTY);
 
     $partsList = [];
@@ -652,12 +630,10 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
                 continue;
             }
 
-            // معالجة حالة التصاق حرف الواو ببداية الكلمة مثل "ويسار" أو "ويمين" أو "وفحمات"
             if (mb_strlen($tokClean) >= 4 && mb_substr($tokClean, 0, 1) === 'و') {
                 $withoutWaw = mb_substr($tokClean, 1);
                 $normWithoutWaw = normalizeArabicSpelling($withoutWaw);
 
-                // هل الكلمة بعد إزالة الواو هي اتجاه (مثل "يسار" في "ويسار") أو قطعة معروفة؟
                 $isDirectionWord = in_array($normWithoutWaw, $modifiersList);
                 $isKnownPart = $isDirectionWord || DB::table('item_keywords')->where('keyword', 'like', "%{$withoutWaw}%")->exists();
 
@@ -678,7 +654,6 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // 6. تطبيق الوراثة الذكية للاتجاهات (تحويل ["مقص امامي يمين", "يسار"] إلى ["مقص امامي يمين", "مقص امامي يسار"])
     $partsList = expandCompoundDirectionalRequests($partsList);
 
     return [
@@ -737,7 +712,7 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
 }
 
 /**
- * دالة جلب إعدادات البوت الخاصة بعميل معين
+ * دالة جلب إعدادات البوت الخاصة بعميل معين (معزولة لكل مستخدم)
  */
 function getUserBotSettings(int $userId): array {
     $defaults = [
@@ -757,13 +732,6 @@ function getUserBotSettings(int $userId): array {
         ->where('user_id', $userId)
         ->pluck('value', 'key')
         ->toArray();
-
-    if (empty($saved)) {
-        $legacy = DB::table('bot_settings')->pluck('value', 'key')->toArray();
-        if (!empty($legacy)) {
-            $saved = $legacy;
-        }
-    }
 
     $result = $defaults;
     foreach ($saved as $k => $v) {
@@ -882,32 +850,39 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
 }
 
 /**
- * دالة إرسال رمز التحقق (OTP) لتسجيل الدخول عبر الواتساب
+ * دالة إرسال رمز التحقق (OTP) لتسجيل الدخول عبر الواتساب:
+ * - لا تُرسل للأدمن نهائياً.
+ * - تُرسل فقط لرقم جوال العميل المسجل في حسابه وعبر إعدادات الواتساب المرتبطة بحساب هذا العميل نفسه فقط.
  */
-function sendWhatsappLoginOtp(string $phone, string $otpCode): bool {
-    $cleanPhone = normalizeWhatsappDigits($phone);
+function sendWhatsappLoginOtp(User $user, string $otpCode): bool {
+    // منع إرسال كود تحقق للأدمن نهائياً
+    if ($user->role === 'admin') {
+        return false;
+    }
+
+    // التأكد من الإرسال حصراً إلى رقم جوال العميل المسجل في حسابه
+    $targetPhone = trim((string) $user->phone);
+    $cleanPhone = normalizeWhatsappDigits($targetPhone);
     if ($cleanPhone === '') {
         return false;
     }
 
-    $admin = User::where('role', 'admin')->first();
-    $settings = $admin ? getUserBotSettings($admin->id) : [];
+    // جلب إعدادات الواتساب المرتبطة بحساب هذا العميل فقط (بدون استخدام إعدادات الأدمن أو أي عميل آخر)
+    $clientWhatsappSettings = DB::table('user_bot_settings')
+        ->where('user_id', $user->id)
+        ->pluck('value', 'key')
+        ->toArray();
 
-    if (empty(trim($settings['whatsapp_api_url'] ?? ''))) {
-        $configuredUser = DB::table('user_bot_settings')
-            ->where('key', 'whatsapp_api_url')
-            ->whereNotNull('value')
-            ->where('value', '!=', '')
-            ->first();
-
-        if ($configuredUser) {
-            $settings = getUserBotSettings((int) $configuredUser->user_id);
-        }
-    }
-
-    if (empty(trim($settings['whatsapp_api_url'] ?? ''))) {
+    $apiUrl = trim((string) ($clientWhatsappSettings['whatsapp_api_url'] ?? ''));
+    if ($apiUrl === '') {
         return false;
     }
+
+    $settings = [
+        'whatsapp_api_url'    => $apiUrl,
+        'whatsapp_api_token'  => trim((string) ($clientWhatsappSettings['whatsapp_api_token'] ?? '')),
+        'whatsapp_session_id' => trim((string) ($clientWhatsappSettings['whatsapp_session_id'] ?? '')),
+    ];
 
     $message = "🔐 رمز التحقق الخاص بك لتسجيل الدخول هو: *{$otpCode}*\nيرجى عدم مشاركة هذا الرمز مع أي شخص.";
     $jid = $cleanPhone . '@s.whatsapp.net';
@@ -995,7 +970,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'pong'], 200);
     }
 
-    // 1. تجاهل الرسائل الصادرة من البوت نفسه فوراً
     $fromMe = data_get($payload, 'data.fromMe')
            ?? data_get($payload, 'data.message.fromMe')
            ?? data_get($payload, 'data.is_from_me')
@@ -1005,20 +979,17 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_from_me'], 200);
     }
 
-    // 2. معرفة صاحب البوت وإعداداته قبل قراءة الرسالة
     $ownerUserId = resolveWebhookOwnerUserId($request, $payload);
     $ownerUser   = User::find($ownerUserId);
     $settings    = getUserBotSettings($ownerUserId);
     $allowGroups = ($settings['allow_group_replies'] ?? '0') === '1';
 
-    // 3. فحص القروبات والقنوات بشكل صارم قبل استخراج رقم المرسل أو قراءة النص
     $groupCheck = detectGroupAndBroadcastStatus($payload);
 
     if ($groupCheck['is_broadcast']) {
         return response()->json(['status' => 'ignored_broadcast_or_status'], 200);
     }
 
-    // إذا كانت الرسالة من قروب والخيار غير مفعل: لا نقرأ الرسالة ولا نسجلها ولا نرد على الشخص في الخاص ولا في القروب
     if ($groupCheck['is_group'] && !$allowGroups) {
         return response()->json(['status' => 'ignored_group_message_completely'], 200);
     }
@@ -1089,7 +1060,6 @@ function handleWebhook(Request $request) {
     $sessionId        = trim($settings['whatsapp_session_id'] ?? '');
     $convId           = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
 
-    // 4. التحقق من الاستثناء (Whitelist) وحد الاستعلامات المسموح لكل رقم
     $quotaPhoneKey = normalizeWhatsappDigits((string) $sender) ?: $cleanPhone;
 
     $isWhitelisted = DB::table('whatsapp_whitelist_phones')
@@ -1116,7 +1086,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_quota_exceeded'], 200);
     }
 
-    // استرجاع جلسة الذاكرة النشطة (إن وجدت)
     $session = DB::table('whatsapp_sessions')
         ->where('user_id', $ownerUserId)
         ->where('phone', $quotaPhoneKey)
@@ -1129,7 +1098,6 @@ function handleWebhook(Request $request) {
 
     $parsed = parseWhatsappText($messageText, $ownerUserId);
 
-    // 5. إذا لم تكن هناك جلسة مفتوحة، نتحقق مما إذا كانت الرسالة استعلاماً حقيقياً عن قطع غيار أم مجرد تحية/دردشة
     if (!$session && !hasGenuinePartInquiryIntent($messageText, $parsed, $ownerUserId)) {
         return response()->json(['status' => 'ignored_non_inquiry_chat'], 200);
     }
@@ -1137,7 +1105,6 @@ function handleWebhook(Request $request) {
     $replyBlocks = [];
     $unavailablePartsNames = [];
 
-    // 6. الحالة الأولى: إذا كتب الزبون رقم صنف مباشر (أو عدة أرقام أصناف) ولا توجد عناصر أخرى تتطلب سيارة/سنة
     if (!empty($parsed['part_numbers']) && empty($parsed['parts_list']) && !$session) {
         foreach ($parsed['part_numbers'] as $pNum) {
             $item = Item::where('user_id', $ownerUserId)
@@ -1212,7 +1179,6 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // 7. الحالة الثانية: استعلام بالاسم (مفرد أو متعدد الأصناف) يحتاج (القطعة + السيارة + سنة الصنع)
     $car  = $parsed['car']  ?: ($session->detected_car ?? null);
     $year = $parsed['year'] ?: ($session->detected_year ?? null);
 
@@ -1273,7 +1239,6 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'waiting_for_part_name_in_memory'], 200);
     }
 
-    // طلب نوع السيارة مرة واحدة لجميع الأصناف إذا لم يُعرف
     if (!$car) {
         if ($msgAskCar === '') {
             return response()->json(['status' => 'skipped_empty_ask_car_template'], 200);
@@ -1291,7 +1256,6 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // طلب سنة الصنع مرة واحدة لجميع الأصناف إذا لم تُعرف
     if (!$year) {
         if ($msgAskYear === '') {
             return response()->json(['status' => 'skipped_empty_ask_year_template'], 200);
@@ -1309,7 +1273,6 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // 8. اكتملت البيانات (قائمة الأصناف + السيارة + سنة الصنع) -> البحث الدقيق عن كل صنف على حدة
     foreach ($mergedPartsList as $singlePartRequest) {
         $singlePartRequest = trim($singlePartRequest);
         if ($singlePartRequest === '') continue;
@@ -1327,7 +1290,6 @@ function handleWebhook(Request $request) {
                     $itemVars['part']        = $singlePartRequest;
                     $itemVars['items']       => "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
 
-                    // تكرار قالب التوفر لكل صنف متوفر تحت بعضه
                     $replyBlocks[] = formatBotTemplate($msgAvailable, $itemVars);
                 }
             }
@@ -1336,7 +1298,6 @@ function handleWebhook(Request $request) {
         }
     }
 
-    // إرسال رد عدم التوفر مرة واحدة فقط في نهاية الرسالة بدون تكرار للأصناف غير الموجودة
     if (!empty($unavailablePartsNames) && $msgUnavailable !== '') {
         $missingSummary = implode(' ، ', array_unique($unavailablePartsNames));
         $unavailVars = $baseTemplateVars;
@@ -1345,13 +1306,11 @@ function handleWebhook(Request $request) {
         $replyBlocks[] = formatBotTemplate($msgUnavailable, $unavailVars);
     }
 
-    // مسح الذاكرة بعد اكتمال الطلب والرد
     DB::table('whatsapp_sessions')
         ->where('user_id', $ownerUserId)
         ->where('phone', $quotaPhoneKey)
         ->delete();
 
-    // زيادة عداد الاستعلامات للزبون
     DB::table('whatsapp_customer_quotas')->updateOrInsert(
         ['user_id' => $ownerUserId, 'phone' => $quotaPhoneKey],
         [
@@ -1384,27 +1343,45 @@ function handleWebhook(Request $request) {
         ],
     ], 200);
 }
-Route::post('/api/webhook/receiver', fn(Request $r) => handleWebhook($r));
-Route::post('/api/webhook/receiver/', fn(Request $r) => handleWebhook($r));
+
+Route::post('/api/webhook/receiver', function (Request $r) {
+    return handleWebhook($r);
+});
+
+Route::post('/api/webhook/receiver/', function (Request $r) {
+    return handleWebhook($r);
+});
 
 require __DIR__.'/auth.php';
 
-// معالجة تسجيل الدخول الموحد (إدارة أو عملاء) مع إرسال رمز التحقق عبر الواتساب
+// معالجة تسجيل الدخول الموحد (إدارة أو عملاء) مع عزل كود التحقق ليرسل للعميل فقط
 Route::post('/login', function (Request $request) {
-    $loginInput = trim($request->input('login', ''));
-    $password = trim($request->input('password', ''));
+    $loginInput = trim((string) $request->input('login', ''));
+    $password = trim((string) $request->input('password', ''));
     $cleanInput = preg_replace('/\D/', '', $loginInput);
 
+    // الدخول برقم الجوال مخصص للعملاء فقط
     if (strlen($cleanInput) === 10 && str_starts_with($cleanInput, '0')) {
         $formattedTarget = formatSaudiPhoneIntl($loginInput);
         $localAlternative = $cleanInput;
 
-        $user = User::where('phone', $formattedTarget)
-                    ->orWhere('phone', $localAlternative)
-                    ->first();
+        $user = User::where(function ($q) use ($formattedTarget, $localAlternative) {
+            $q->where('phone', $formattedTarget)
+              ->orWhere('phone', $localAlternative);
+        })->first();
 
         if (!$user) {
             return back()->withInput()->with('error', 'رقم الجوال هذا غير مسجل في النظام.');
+        }
+
+        // إذا كان الحساب يخص الأدمن، لا يتم إرسال كود تحقق عبر الواتساب بل يُطلب منه الدخول ببيانات الإدارة
+        if ($user->role === 'admin') {
+            if (!empty($password) && Hash::check($password, $user->password)) {
+                Auth::login($user);
+                $request->session()->regenerate();
+                return redirect()->intended('/dashboard');
+            }
+            return back()->withInput()->with('error', 'حساب الإدارة يسجل الدخول عبر البريد الإلكتروني/اسم المستخدم وكلمة المرور الخاصة بالإدارة.');
         }
 
         if (!$user->is_active) {
@@ -1415,8 +1392,8 @@ Route::post('/login', function (Request $request) {
             $user->otp_code = (string) random_int(1000, 9999);
             $user->save();
 
-            // إرسال كود التحقق إلى واتساب العميل
-            $sentViaWhatsapp = sendWhatsappLoginOtp($user->phone ?: $loginInput, $user->otp_code);
+            // إرسال كود التحقق حصراً إلى رقم جوال العميل المسجل ومن خلال ربط الواتساب الخاص بحسابه فقط
+            $sentViaWhatsapp = sendWhatsappLoginOtp($user, $user->otp_code);
 
             return back()->withInput()
                          ->with('phone_for_otp', $loginInput)
@@ -1438,6 +1415,7 @@ Route::post('/login', function (Request $request) {
                          ->with('error', 'كود التحقق غير صحيح. حاول مرة أخرى.');
         }
     } else {
+        // تسجيل دخول الإدارة (أو بالبريد الإلكتروني وكلمة المرور) بدون إرسال أي رسائل واتساب نهائياً
         if (Auth::attempt(['email' => $loginInput, 'password' => $password])) {
             $request->session()->regenerate();
             return redirect()->intended('/dashboard');
@@ -1446,6 +1424,7 @@ Route::post('/login', function (Request $request) {
         $user = User::where('email', $loginInput)->orWhere('name', $loginInput)->first();
         if ($user && Hash::check($password, $user->password)) {
             Auth::login($user);
+            $request->session()->regenerate();
             return redirect()->intended('/dashboard');
         }
 
@@ -1720,7 +1699,7 @@ Route::middleware('auth')->group(function () {
 
     Route::post('/master-catalog/{itemNumber}/keyword', function (Request $request, $itemNumber) {
         if (auth()->user()->role !== 'admin') abort(403);
-        $word = trim($request->input('keyword'));
+        $word = trim((string) $request->input('keyword'));
         if ($word !== '') {
             DB::table('item_keywords')->insertOrIgnore([
                 'item_number' => $itemNumber,
@@ -1786,7 +1765,7 @@ Route::middleware('auth')->group(function () {
 
         DB::table('car_aliases')->insert([
             'car_id'     => $id,
-            'alias'      => trim($request->alias),
+            'alias'      => trim((string) $request->alias),
             'created_at' => now(),
             'updated_at' => now(),
         ]);
@@ -1806,7 +1785,7 @@ Route::middleware('auth')->group(function () {
         if (auth()->user()->role !== 'admin') abort(403);
 
         DB::table('year_patterns')->insert([
-            'pattern_example' => trim($request->pattern_example),
+            'pattern_example' => trim((string) $request->pattern_example),
             'created_at'      => now(),
             'updated_at'      => now(),
         ]);
@@ -1822,7 +1801,7 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم الحذف.');
     })->name('year.pattern.destroy');
 
-    // 6. مسارات الرد الآلي والذكاء الاصطناعي والحدود والاستثناءات (مع تطبيق نفس البحث الدقيق في شاشة التجربة)
+    // 6. مسارات الرد الآلي والذكاء الاصطناعي والحدود والاستثناءات
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId = auth()->id();
         $customerMessage = (string) $request->query('message', '');
@@ -1915,7 +1894,6 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حفظ إعدادات البوت وحدود الاستعلام وقوالب الرسائل بنجاح.');
     })->name('pages.second.settings');
 
-    // إضافة رقم مستثنى (حد مفتوح لا نهائي)
     Route::post('/ai-whatsapp/whitelist', function (Request $request) {
         $userId = auth()->id();
         $rawPhone = trim((string) $request->input('phone', ''));
@@ -1942,7 +1920,6 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حذف الرقم من قائمة الاستثناء.');
     })->name('pages.second.whitelist.delete');
 
-    // تصفير عداد الاستعلامات لرقم معين أو للجميع
     Route::post('/ai-whatsapp/quotas/reset', function (Request $request) {
         $userId = auth()->id();
         if ($request->filled('quota_id')) {
