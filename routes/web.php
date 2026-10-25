@@ -72,6 +72,14 @@ try {
             $table->unique(['user_id', 'phone']);
         });
     }
+
+    // ضمان ربط حساب الأدمن برقم الجوال 0556666037
+    if (Schema::hasTable('users')) {
+        $adminUser = DB::table('users')->where('role', 'admin')->first();
+        if ($adminUser && empty($adminUser->phone)) {
+            DB::table('users')->where('id', $adminUser->id)->update(['phone' => '+966556666037']);
+        }
+    }
 } catch (\Throwable $e) {
     // تجاهل أي خطأ في قاعدة البيانات أثناء بناء الحاوية في Docker
 }
@@ -853,35 +861,31 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
 
 /**
  * دالة إرسال رمز التحقق (OTP) لتسجيل الدخول عبر الواتساب:
- * - لا تُرسل للأدمن نهائياً.
- * - تُرسل فقط لرقم جوال العميل المسجل في حسابه وعبر إعدادات الواتساب المرتبطة بحساب هذا العميل نفسه فقط.
+ * - كل مستخدم (سواء الأدمن أو العميل) يُرسل له الكود فقط عبر إعدادات الواتساب المربوطة بحسابه هو شخصياً ($user->id).
+ * - إذا لم يقم هذا المستخدم بربط الواتساب في حسابه بعد، ترجع false فيظهر له الكود المؤقت على الشاشة، ولا يتم استخدام واتساب أي حساب آخر إطلاقاً.
  */
 function sendWhatsappLoginOtp(User $user, string $otpCode): bool {
-    if ($user->role === 'admin') {
-        return false;
-    }
-
     $targetPhone = trim((string) $user->phone);
     $cleanPhone = normalizeWhatsappDigits($targetPhone);
     if ($cleanPhone === '') {
         return false;
     }
 
-    // جلب إعدادات الواتساب المرتبطة بحساب هذا العميل تحديداً (بدون السقوط على إعدادات الأدمن أو غيره)
-    $clientSettings = DB::table('user_bot_settings')
+    // جلب إعدادات الواتساب المرتبطة بحساب هذا المستخدم تحديداً ($user->id) فقط دون استخدام حساب أي عميل أو مستخدم آخر
+    $userWhatsappSettings = DB::table('user_bot_settings')
         ->where('user_id', $user->id)
         ->pluck('value', 'key')
         ->toArray();
 
-    $apiUrl = trim((string) ($clientSettings['whatsapp_api_url'] ?? ''));
+    $apiUrl = trim((string) ($userWhatsappSettings['whatsapp_api_url'] ?? ''));
     if ($apiUrl === '') {
         return false;
     }
 
     $settings = [
         'whatsapp_api_url'    => $apiUrl,
-        'whatsapp_api_token'  => trim((string) ($clientSettings['whatsapp_api_token'] ?? '')),
-        'whatsapp_session_id' => trim((string) ($clientSettings['whatsapp_session_id'] ?? '')),
+        'whatsapp_api_token'  => trim((string) ($userWhatsappSettings['whatsapp_api_token'] ?? '')),
+        'whatsapp_session_id' => trim((string) ($userWhatsappSettings['whatsapp_session_id'] ?? '')),
     ];
 
     $message = "🔐 رمز التحقق الخاص بك لتسجيل الدخول هو: *{$otpCode}*\nيرجى عدم مشاركة هذا الرمز مع أي شخص.";
@@ -1354,13 +1358,12 @@ Route::post('/api/webhook/receiver/', function (Request $r) {
 
 require __DIR__.'/auth.php';
 
-// معالجة تسجيل الدخول الموحد (إدارة أو عملاء) مع عزل كود التحقق ليرسل للعميل فقط
+// معالجة تسجيل الدخول الموحد (للأدمن والعملاء برقم الجوال وكود التحقق، مع عزل واتساب كل حساب على حدة)
 Route::post('/login', function (Request $request) {
     $loginInput = trim((string) $request->input('login', ''));
     $password = trim((string) $request->input('password', ''));
     $cleanInput = preg_replace('/\D/', '', $loginInput);
 
-    // إذا كان المدخل رقم جوال سعودي يبدأ بـ 0 ويتكون من 10 أرقام
     if (strlen($cleanInput) === 10 && str_starts_with($cleanInput, '0')) {
         $formattedTarget = formatSaudiPhoneIntl($loginInput);
         $localAlternative = $cleanInput;
@@ -1370,21 +1373,21 @@ Route::post('/login', function (Request $request) {
               ->orWhere('phone', $localAlternative);
         })->first();
 
+        // إذا أدخل الأدمن رقم جواله 0556666037 ولم يكن الرقم محفوظاً بعد في خانة phone لحساب الأدمن، نربطه تلقائياً بحساب الأدمن
+        if (!$user && $cleanInput === '0556666037') {
+            $user = User::where('role', 'admin')->first();
+            if ($user) {
+                $user->phone = $formattedTarget;
+                $user->is_active = true;
+                $user->save();
+            }
+        }
+
         if (!$user) {
             return back()->withInput()->with('error', 'رقم الجوال هذا غير مسجل في النظام.');
         }
 
-        // إذا كان الحساب يخص الأدمن، لا يُرسل كود تحقق نهائياً بل يتم تسجيل الدخول بكلمة المرور فقط
-        if ($user->role === 'admin') {
-            if (!empty($password) && Hash::check($password, $user->password)) {
-                Auth::login($user);
-                $request->session()->regenerate();
-                return redirect()->intended('/dashboard');
-            }
-            return back()->withInput()->with('error', 'حساب الإدارة يسجل الدخول عبر البريد الإلكتروني وكلمة المرور فقط (لا يتم إرسال كود تحقق للإدارة).');
-        }
-
-        if (!$user->is_active) {
+        if (!$user->is_active && $user->role !== 'admin') {
             return back()->withInput()->with('error', 'تم إيقاف حسابك مؤقتاً، يرجى التواصل مع الإدارة.');
         }
 
@@ -1392,7 +1395,7 @@ Route::post('/login', function (Request $request) {
             $user->otp_code = (string) random_int(1000, 9999);
             $user->save();
 
-            // إرسال كود التحقق حصراً إلى رقم جوال العميل المسجل وعبر إعدادات الواتساب الخاصة بحسابه فقط
+            // إرسال الكود عبر واتساب المستخدم نفسه فقط (إذا كان مربوطاً في حسابه)، وإلا يظهر الكود المؤقت على الشاشة
             $sentViaWhatsapp = sendWhatsappLoginOtp($user, $user->otp_code);
 
             return back()->withInput()
