@@ -13,12 +13,18 @@
                     🤖 مساعد الذكاء الاصطناعي والواتساب
                 </h2>
                 <p class="text-sm text-slate-500 mt-1">
-                    البوت محمي تلقائياً: لا يرد في المجموعات (القروبات)، ولا يرد على التحيات العادية (مثل السلام عليكم)، ويتعرف فوراً على أرقام الأصناف أو الطلبات المتعددة في رسالة واحدة.
+                    البوت محمي تلقائياً: يتحكم في القروبات حسب اختيارك بالأسفل، ولا يرد على التحيات العادية (مثل السلام عليكم)، ويتعرف فوراً على أرقام الأصناف أو الطلبات المتعددة في رسالة واحدة.
                 </p>
             </div>
-            <span class="bg-emerald-100 text-emerald-800 text-xs font-bold px-3 py-1.5 rounded-full">
-                🛡️ مانع القروبات والدردشة العشوائية: مفعل
-            </span>
+            @if(($botSettings['allow_group_replies'] ?? '0') === '1')
+                <span class="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1.5 rounded-full">
+                    👥 قراءة والرد في القروبات: مفعل
+                </span>
+            @else
+                <span class="bg-emerald-100 text-emerald-800 text-xs font-bold px-3 py-1.5 rounded-full">
+                    🛡️ مانع القروبات والدردشة العشوائية: مفعل
+                </span>
+            @endif
         </div>
 
         <form method="GET" action="{{ route('pages.second') }}" class="mt-4 flex gap-3">
@@ -188,6 +194,24 @@
                 <div>
                     <label class="block text-sm font-bold text-slate-700 mb-1">مفتاح الربط (API Token / Key) :</label>
                     <input type="text" name="whatsapp_api_token" value="{{ $botSettings['whatsapp_api_token'] ?? '' }}" placeholder="أدخل التوكن الخاص بحسابك" class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-emerald-500 font-mono" />
+                </div>
+            </div>
+
+            <!-- خيار تفعيل أو تعطيل قراءة والرد على رسائل المجموعات (القروبات) -->
+            <div class="p-4 bg-emerald-50/60 rounded-xl border border-emerald-200 flex items-center justify-between gap-4">
+                <div>
+                    <label for="allow_group_replies" class="font-bold text-slate-800 text-sm block cursor-pointer">
+                        👥 تفعيل قراءة والرد على الرسائل في المجموعات (القروبات)
+                    </label>
+                    <p class="text-xs text-slate-600 mt-1">
+                        في حال <strong>عدم التفعيل</strong>، سيتجاهل البوت رسائل القروبات تماماً ولن يقرأها ولن يرد عليها لا في القروب ولا في الخاص للناس اللي تكتب في القروبات. وفي حال <strong>التفعيل</strong> سيقرأ الرسائل ويرد داخل القروب.
+                    </p>
+                </div>
+                <div class="flex items-center">
+                    <input type="hidden" name="allow_group_replies" value="0">
+                    <input type="checkbox" id="allow_group_replies" name="allow_group_replies" value="1"
+                           {{ ($botSettings['allow_group_replies'] ?? '0') === '1' ? 'checked' : '' }}
+                           class="w-6 h-6 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer">
                 </div>
             </div>
 
