@@ -9,6 +9,23 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Database\Schema\Blueprint;
+
+// تهيئة جداول إعدادات البوت وذاكرة المحادثة تلقائياً في حال عدم وجودها
+if (!Schema::hasTable('bot_settings')) {
+    Schema::create('bot_settings', function (Blueprint $table) {
+        $table->string('key')->primary();$table->text('value')->nullable();
+    });
+}
+if (!Schema::hasTable('whatsapp_sessions')) {
+    Schema::create('whatsapp_sessions', function (Blueprint $table) {$table->id();
+        $table->string('phone')->unique();$table->string('detected_car')->nullable();
+        $table->string('detected_year')->nullable();$table->text('part_query')->nullable();
+        $table->text('full_conversation')->nullable();$table->timestamps();
+    });
+}
 
 Route::get('/', function () {
     return redirect()->route('inventory.index');
@@ -22,7 +39,7 @@ Route::get('/dashboard', function () {
  * دالة لتنسيق رقم الجوال بالصيغة الدولية الموحدة +966
  */
 function formatSaudiPhoneIntl($phone) {
-    $digits = preg_replace('/\D/', '', $phone);
+    $digits = preg_replace('/\D/', '',$phone);
     if (str_starts_with($digits, '966')) {
         $digits = substr($digits, 3);
     }
@@ -49,35 +66,34 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     $detectedYears = null;
 
     $carsList = DB::table('cars')->get();
-    foreach ($carsList as $car) {
-        if (mb_stripos($cleanName, $car->car_name) !== false) {
-            $detectedCar = $car->car_name;
-            $detectedCategory = $car->category;
+    foreach ($carsList as$car) {
+        if (mb_stripos($cleanName,$car->car_name) !== false) {
+            $detectedCar =$car->car_name;
+            $detectedCategory =$car->category;
             break;
         }
-        $aliases = DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray();
-        foreach ($aliases as $alias) {
-            if ($alias !== '' && mb_stripos($cleanName, $alias) !== false) {
-                $detectedCar = $car->car_name;
-                $detectedCategory = $car->category;
+        $aliases = DB::table('car_aliases')->where('car_id',$car->id)->pluck('alias')->toArray();
+        foreach ($aliases as$alias) {
+            if ($alias !== '' && mb_stripos($cleanName,$alias) !== false) {
+                $detectedCar =$car->car_name;
+                $detectedCategory =$car->category;
                 break 2;
             }
         }
     }
 
-    $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
-    $wordsInName = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $cleanName, -1, PREG_SPLIT_NO_EMPTY);
+    $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();$wordsInName = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $cleanName, -1, PREG_SPLIT_NO_EMPTY);
 
-    foreach ($patterns as $pattern) {
-        if (mb_stripos($cleanName, $pattern) !== false) {
-            $detectedYears = $pattern;
+    foreach ($patterns as$pattern) {
+        if (mb_stripos($cleanName,$pattern) !== false) {
+            $detectedYears =$pattern;
             break;
         }
     }
     if (!$detectedYears) {
-        foreach ($wordsInName as $word) {
+        foreach ($wordsInName as$word) {
             if (preg_match('/^(?:(?:19|20)?\d{2})[\/-](?:(?:19|20)?\d{2})$/u', $word) || preg_match('/^\d{2}[\-\/]\d{2}$/u', $word)) {
-                $detectedYears = $word;
+                $detectedYears =$word;
                 break;
             }
         }
@@ -91,7 +107,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
             'detected_years'    => $detectedYears,
         ]);
 
-    $existingMaster = DB::table('master_items')->where('item_number', $cleanNumber)->first();
+    $existingMaster = DB::table('master_items')->where('item_number',$cleanNumber)->first();
     if (!$existingMaster) {
         DB::table('master_items')->insert([
             'item_number'     => $cleanNumber,
@@ -103,19 +119,18 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     }
 
     $skipWords = [];
-    if ($detectedCar) {
-        $skipWords = array_merge($skipWords, preg_split('/[\s,\-]+/u', $detectedCar));
+    if ($detectedCar) {$skipWords = array_merge($skipWords, preg_split('/[\s,\-]+/u',$detectedCar));
     }
     if ($detectedYears) {
-        $skipWords[] = $detectedYears;
+        $skipWords[] =$detectedYears;
     }
     $skipWords = array_map('mb_strtolower', array_filter($skipWords));
 
-    foreach ($wordsInName as $word) {
+    foreach ($wordsInName as$word) {
         $wordClean = trim($word);
         $wordLower = mb_strtolower($wordClean);
 
-        if (mb_strlen($wordClean) >= 2 && !is_numeric($wordClean) && !in_array($wordLower, $skipWords)) {
+        if (mb_strlen($wordClean) >= 2 && !is_numeric($wordClean) && !in_array($wordLower,$skipWords)) {
             DB::table('item_keywords')->insertOrIgnore([
                 'item_number' => $cleanNumber,
                 'keyword'     => $wordClean,
@@ -128,19 +143,254 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
 
 function syncAllExistingItemsToCore(): void {
     $allItems = DB::table('items')->orderBy('id', 'asc')->get();
-    foreach ($allItems as $item) {
-        syncItemToMasterCore($item->item_number, $item->item_name, $item->user_id);
+    foreach ($allItems as$item) {
+        syncItemToMasterCore($item->item_number, $item->item_name,$item->user_id);
     }
 }
 
+/**
+ * دالة استخراج السيارة والسنة واسم القطعة من نص رسالة العميل
+ */
+function parseWhatsappText(string $text): array {$detectedCar = null;
+    $detectedYear = null;
+    $remainingText =$text;
+
+    $carsList = DB::table('cars')->get();
+    foreach ($carsList as$car) {
+        if (mb_stripos($text,$car->car_name) !== false) {
+            $detectedCar =$car->car_name;
+            $remainingText = str_ireplace($car->car_name, '',$remainingText);
+            break;
+        }
+        $aliases = DB::table('car_aliases')->where('car_id',$car->id)->pluck('alias')->toArray();
+        foreach ($aliases as$alias) {
+            if ($alias !== '' && mb_stripos($text,$alias) !== false) {
+                $detectedCar =$car->car_name;
+                $remainingText = str_ireplace($alias, '',$remainingText);
+                break 2;
+            }
+        }
+    }
+
+    $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
+    foreach ($patterns as$pattern) {
+        if (mb_stripos($text,$pattern) !== false) {
+            $detectedYear =$pattern;
+            $remainingText = str_ireplace($pattern, '',$remainingText);
+            break;
+        }
+    }
+
+    if (!$detectedYear) {
+        if (preg_match('/\b(19\d{2}|20\d{2})\b/u', $text, $matches)) {$detectedYear = $matches[1];$remainingText = str_replace($matches[1], '',$remainingText);
+        } elseif (preg_match('/\b(\d{2}[\-\/]\d{2})\b/u', $text, $matches)) {$detectedYear = $matches[1];$remainingText = str_replace($matches[1], '',$remainingText);
+        }
+    }
+
+    // تنظيف النص المتبقي لاستخراج اسم القطعة الصافي
+    $stopWords = ['السلام', 'عليكم', 'ابغى', 'ابغا', 'ابي', 'عندكم', 'موجود', 'احصل', 'سيارة', 'سياره', 'موديل', 'سنة', 'سنه', 'لو', 'سمحت', 'ياغالي', 'بكم', 'هل', 'فيه', 'يتوفر'];
+    $words = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', trim($remainingText), -1, PREG_SPLIT_NO_EMPTY);$cleanWords = [];
+    foreach ($words as$w) {
+        if (!in_array(mb_strtolower($w), $stopWords) && mb_strlen($w) >= 2) {
+            $cleanWords[] =$w;
+        }
+    }
+
+    return [
+        'car'  => $detectedCar,
+        'year' => $detectedYear,
+        'part' => implode(' ', $cleanWords),
+    ];
+}
+
+/**
+ * دالة إرسال رسالة واتساب والرد التلقائي عبر الويب هوك مع الذاكرة
+ */
 function handleWebhook(Request $request) {
+    $payload = $request->all();
+
     DB::table('webhook_logs')->insert([
         'event_type' => $request->input('event', 'unknown'),
-        'payload'    => json_encode($request->all(), JSON_UNESCAPED_UNICODE),
+        'payload'    => json_encode($payload, JSON_UNESCAPED_UNICODE),
         'created_at' => now(),
         'updated_at' => now(),
     ]);
-    return response()->json(['status' => 'success'], 200);
+
+    // تجاهل الرسائل الصادرة من البوت نفسه (fromMe) لمنع التكرار اللانهائي
+    $fromMe = data_get($payload, 'data.fromMe', data_get($payload, 'fromMe', false));
+    if ($fromMe === true || $fromMe === 'true' || $fromMe === 1) {
+        return response()->json(['status' => 'ignored_from_me'], 200);
+    }
+
+    // استخراج رقم المرسل ونص الرسالة من مختلف صيغ الويب هوك (GreatWhats / UltraMsg / WhatsApp API)
+    $sender = data_get($payload, 'data.from')
+           ?? data_get($payload, 'from')
+           ?? data_get($payload, 'sender')
+           ?? data_get($payload, 'phone')
+           ?? data_get($payload, 'data.key.remoteJid');
+
+    $messageText = data_get($payload, 'data.body')
+                ?? data_get($payload, 'body')
+                ?? data_get($payload, 'message')
+                ?? data_get($payload, 'text')
+                ?? data_get($payload, 'data.message.conversation')
+                ?? data_get($payload, 'data.message.extendedTextMessage.text');
+
+    if (!$sender || !$messageText || !is_string($messageText)) {
+        return response()->json(['status' => 'no_message_detected'], 200);
+    }
+
+    $cleanPhone = preg_replace('/@.*$/', '', $sender);
+    $cleanPhone = preg_replace('/\D/', '', $cleanPhone);
+    $messageText = trim($messageText);
+
+    if ($cleanPhone === '' || $messageText === '') {
+        return response()->json(['status' => 'empty'], 200);
+    }
+
+    // جلب إعدادات الردود المخصصة
+    $settings = DB::table('bot_settings')->pluck('value', 'key')->toArray();
+    $msgAskCar      = $settings['reply_ask_car'] ?? 'حياك الله، فضلاً ما هو نوع أو اسم السيارة؟';
+    $msgAskYear     = $settings['reply_ask_year'] ?? 'فضلاً كم موديل (سنة صنع) السيارة؟';
+    $msgAvailable   = $settings['reply_available'] ?? "القطعة متوفرة لدينا ✅\nتفاصيل القطعة:\n{items}";
+    $msgUnavailable = $settings['reply_unavailable'] ?? 'نعتذر منك، القطعة المطلوبة غير متوفرة حالياً في المخزون ❌';
+
+    // استرجاع ذاكرة المحادثة للعميل (تنتهي صلاحية الذاكرة بعد ساعتين من عدم التفاعل)
+    $session = DB::table('whatsapp_sessions')->where('phone', $cleanPhone)->first();
+    if ($session && now()->diffInMinutes($session->updated_at) > 120) {
+        DB::table('whatsapp_sessions')->where('phone', $cleanPhone)->delete();
+        $session = null;
+    }
+
+    // تحليل الرسالة الجديدة ودمجها مع الذاكرة السابقة
+    $parsed = parseWhatsappText($messageText);
+
+    $car  = $parsed['car']  ?: ($session->detected_car ?? null);
+    $year = $parsed['year'] ?: ($session->detected_year ?? null);
+    $part = $parsed['part'] ?: ($session->part_query ?? null);
+
+    // إذا كان العميل قد ذكر جزءاً من اسم القطعة سابقاً وأضاف كلاماً جديداً للقطعة
+    if (!empty($session->part_query) && !empty($parsed['part']) && mb_stripos($session->part_query, $parsed['part']) === false) {
+        $part = trim($session->part_query . ' ' . $parsed['part']);
+    }
+
+    $fullConv = trim(($session->full_conversation ?? '') . ' ' . $messageText);
+
+    // تحديث أو إنشاء ذاكرة العميل
+    DB::table('whatsapp_sessions')->updateOrInsert(
+        ['phone' => $cleanPhone],
+        [
+            'detected_car'      => $car,
+            'detected_year'     => $year,
+            'part_query'        => $part ?: $messageText,
+            'full_conversation' => $fullConv,
+            'updated_at'        => now(),
+            'created_at'        => $session->created_at ?? now(),
+        ]
+    );
+
+    // التحقق من اكتمال أركان الطلب: 1. نوع السيارة -> 2. سنة الصنع -> 3. البحث والرد
+    if (!$car) {
+        $replyText = $msgAskCar;
+    } elseif (!$year) {
+        $replyText = str_replace('{car}', $car, $msgAskYear);
+    } else {
+        // اكتملت البيانات (السيارة + السنة + القطعة) -> نبحث في المخزون
+        $searchPart = $part ?: $fullConv;
+        $partWords = array_filter(explode(' ', $searchPart), fn($w) => mb_strlen($w) >= 2);
+
+        $matchedNumbers = [];
+        if (!empty($partWords)) {
+            $kwQuery = DB::table('item_keywords');
+            foreach ($partWords as $pw) {
+                $kwQuery->orWhere('keyword', 'like', "%{$pw}%");
+            }
+            $matchedNumbers = $kwQuery->pluck('item_number')->toArray();
+        }
+
+        $itemsQuery = Item::where('quantity', '>', 0)
+            ->where(function ($q) use ($car) {
+                $q->where('detected_car_name', 'like', "%{$car}%")
+                  ->orWhere('item_name', 'like', "%{$car}%");
+            });
+
+        // مطابقة سنة الصنع (أو آخر رقمين منها مثل 18 لـ 2018)
+        $shortYear = strlen($year) === 4 ? substr($year, 2, 2) : $year;
+        $itemsQuery->where(function ($q) use ($year, $shortYear) {
+            $q->where('detected_years', 'like', "%{$year}%")
+              ->orWhere('detected_years', 'like', "%{$shortYear}%")
+              ->orWhere('item_name', 'like', "%{$year}%")
+              ->orWhere('item_name', 'like', "%{$shortYear}%");
+        });
+
+        // مطابقة اسم القطعة أو الكلمات المفتاحية
+        if (!empty($partWords) || !empty($matchedNumbers)) {
+            $itemsQuery->where(function ($q) use ($partWords, $matchedNumbers) {
+                if (!empty($matchedNumbers)) {
+                    $q->orWhereIn('item_number', $matchedNumbers);
+                }
+                foreach ($partWords as $pw) {
+                    $q->orWhere('item_name', 'like', "%{$pw}%")
+                      ->orWhere('item_number', 'like', "%{$pw}%");
+                }
+            });
+        }
+
+        $foundItems = $itemsQuery->take(5)->get();
+
+        if ($foundItems->count() > 0) {
+            $itemsListText = $foundItems->map(function ($i) {
+                return "- {$i->item_name} (رقم: {$i->item_number}) | السعر: {$i->price} ريال";
+            })->implode("\n");
+
+            $replyText = str_replace(
+                ['{items}', '{car}', '{year}', '{part}'],
+                [$itemsListText, $car, $year, $searchPart],
+                $msgAvailable
+            );
+        } else {
+            $replyText = str_replace(
+                ['{car}', '{year}', '{part}'],
+                [$car, $year, $searchPart],
+                $msgUnavailable
+            );
+        }
+
+        // مسح الذاكرة بعد إتمام الرد النهائي بنجاح ليكون جاهزاً لطلب جديد
+        DB::table('whatsapp_sessions')->where('phone', $cleanPhone)->delete();
+    }
+
+    // إرسال الرد عبر بوابة الواتساب إذا كان رابط الـ API مضافاً في الإعدادات
+    $apiUrl   = $settings['whatsapp_api_url'] ?? '';
+    $apiToken = $settings['whatsapp_api_token'] ?? '';
+
+    if (!empty($apiUrl)) {
+        try {
+            Http::withoutVerifying()->timeout(10)->post($apiUrl, [
+                'token'   => $apiToken,
+                'api_key' => $apiToken,
+                'to'      => $cleanPhone,
+                'phone'   => $cleanPhone,
+                'number'  => $cleanPhone,
+                'body'    => $replyText,
+                'message' => $replyText,
+                'text'    => $replyText,
+            ]);
+        } catch (\Throwable $e) {
+            // تجاهل خطأ الاتصال الخارجي لضمان إرجاع 200 للويب هوك
+        }
+    }
+
+    return response()->json([
+        'status'  => 'success',
+        'reply'   => $replyText,
+        'message' => $replyText,
+        'memory'  => [
+            'car'  => $car,
+            'year' => $year,
+            'part' => $part,
+        ]
+    ], 200);
 }
 Route::post('/api/webhook/receiver', fn(Request $r) => handleWebhook($r));
 Route::post('/api/webhook/receiver/', fn(Request $r) => handleWebhook($r));
@@ -274,9 +524,39 @@ Route::middleware('auth')->group(function () {
             return back()->with('success', 'تمت إضافة الصنف بنجاح.');
         })->name('store');
 
+        // مسار الاستيراد يدعم الرفع المباشر أو الرفع المتدرج بالعداد (Batch Import) للعميل والمدير
         Route::post('/import', function (Request $request) {
+            $userId = auth()->id();
+
+            if ($request->has('items_batch') && is_array($request->input('items_batch'))) {
+                $batch = $request->input('items_batch');
+                $importedCount = 0;
+
+                foreach ($batch as $row) {
+                    $itemNumber = strtoupper(trim((string) ($row['item_number'] ?? '')));
+                    $itemName   = trim((string) ($row['item_name'] ?? ''));
+                    $quantity   = (int) ($row['quantity'] ?? 0);
+                    $price      = (float) ($row['price'] ?? 0);
+
+                    if ($itemNumber === '' || $itemName === '') continue;
+
+                    $item = Item::updateOrCreate(
+                        ['user_id' => $userId, 'item_number' => $itemNumber],
+                        ['item_name' => $itemName, 'quantity' => $quantity, 'price' => $price]
+                    );
+
+                    syncItemToMasterCore($item->item_number, $item->item_name, $userId);
+                    $importedCount++;
+                }
+
+                return response()->json([
+                    'status'   => 'success',
+                    'imported' => $importedCount,
+                ]);
+            }
+
             $response = app(ItemController::class)->import($request);
-            DB::table('items')->whereNull('user_id')->update(['user_id' => auth()->id()]);
+            DB::table('items')->whereNull('user_id')->update(['user_id' => $userId]);
             syncAllExistingItemsToCore();
             return $response;
         })->name('import');
@@ -509,7 +789,7 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم الحذف.');
     })->name('year.pattern.destroy');
 
-    // 6. مسارات الرد الآلي والذكاء الاصطناعي
+    // 6. مسارات الرد الآلي والذكاء الاصطناعي وإعدادات قوالب الرد والذاكرة
     Route::get('/ai-whatsapp', function (Request $request) {
         $customerMessage = (string) $request->query('message', '');
         $matchedItems = collect();
@@ -527,11 +807,43 @@ Route::middleware('auth')->group(function () {
                 ->get();
         }
 
+        $botSettings = DB::table('bot_settings')->pluck('value', 'key')->toArray();
+        $activeSessions = DB::table('whatsapp_sessions')->latest('updated_at')->take(15)->get();
+
         return view('pages.second', [
             'customerMessage' => $customerMessage,
             'matchedItems'    => $matchedItems,
+            'botSettings'     => $botSettings,
+            'activeSessions'  => $activeSessions,
         ]);
     })->name('pages.second');
+
+    Route::post('/ai-whatsapp/settings', function (Request $request) {
+        $fields = [
+            'reply_available',
+            'reply_unavailable',
+            'reply_ask_car',
+            'reply_ask_year',
+            'whatsapp_api_url',
+            'whatsapp_api_token',
+        ];
+
+        foreach ($fields as $field) {
+            if ($request->has($field)) {
+                DB::table('bot_settings')->updateOrInsert(
+                    ['key' => $field],
+                    ['value' => trim((string) $request->input($field, ''))]
+                );
+            }
+        }
+
+        return back()->with('success', 'تم حفظ إعدادات الرد الآلي وقوالب الرسائل بنجاح.');
+    })->name('pages.second.settings');
+
+    Route::delete('/ai-whatsapp/sessions/{id}', function ($id) {
+        DB::table('whatsapp_sessions')->where('id', $id)->delete();
+        return back()->with('success', 'تم مسح جلسة ذاكرة العميل.');
+    })->name('pages.second.session.delete');
 
     // 7. إعدادات الربط API والنسخ الاحتياطي
     Route::get('/page-third', function () {
