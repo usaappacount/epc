@@ -98,5 +98,170 @@
             </div>
 
         </div>
+
+        <!-- ودجت عائم عابر للصفحات لمتابعة استيراد الإكسل في الخلفية واسترجاع النسخة الفورية -->
+        @auth
+        <div id="global-bg-import-widget" class="hidden fixed bottom-5 left-5 z-50 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 transition-all duration-300">
+            <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-2">
+                    <span id="global-import-spinner" class="inline-block w-3 h-3 rounded-full bg-indigo-600 animate-ping"></span>
+                    <h4 id="global-import-title" class="text-sm font-bold text-slate-800">جاري استيراد الإكسل في الخلفية...</h4>
+                </div>
+                <button type="button" onclick="dismissGlobalImportWidget()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+            </div>
+
+            <p id="global-import-filename" class="text-xs text-slate-500 truncate mb-2"></p>
+
+            <div class="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden mb-2">
+                <div id="global-import-bar" class="bg-indigo-600 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+
+            <div class="flex items-center justify-between text-xs text-slate-600 font-semibold">
+                <span id="global-import-stats">0 / 0 صنف</span>
+                <span id="global-import-percent" class="text-indigo-600 font-bold">0%</span>
+            </div>
+
+            <div id="global-import-details" class="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                <span>جديد: <strong id="global-import-new" class="text-emerald-600">0</strong> | محدث: <strong id="global-import-updated" class="text-blue-600">0</strong></span>
+                <button type="button" id="global-rollback-btn" onclick="triggerGlobalRollback()" class="hidden text-rose-600 hover:text-rose-700 font-bold underline">
+                    ↩️ تراجع فوري
+                </button>
+            </div>
+        </div>
+
+        <script>
+            (function () {
+                if (window.__bgImportTrackerInitialized) return;
+                window.__bgImportTrackerInitialized = true;
+
+                let pollTimer = null;
+                let lastCompletedJobId = sessionStorage.getItem('dismissed_import_job_id');
+
+                async function checkBackgroundImportStatus() {
+                    try {
+                        const res = await fetch("{{ route('inventory.import.status') }}", {
+                            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+                        });
+                        if (!res.ok) return;
+                        const data = await res.json();
+                        const job = data.job;
+
+                        if (!job) return;
+
+                        const widget = document.getElementById('global-bg-import-widget');
+                        const titleEl = document.getElementById('global-import-title');
+                        const fileEl = document.getElementById('global-import-filename');
+                        const barEl = document.getElementById('global-import-bar');
+                        const statsEl = document.getElementById('global-import-stats');
+                        const percentEl = document.getElementById('global-import-percent');
+                        const newEl = document.getElementById('global-import-new');
+                        const updEl = document.getElementById('global-import-updated');
+                        const spinnerEl = document.getElementById('global-import-spinner');
+                        const rollbackBtn = document.getElementById('global-rollback-btn');
+
+                        if (job.status === 'pending' || job.status === 'processing') {
+                            sessionStorage.setItem('active_import_job_id', job.id);
+                            widget.classList.remove('hidden');
+                            spinnerEl.className = 'inline-block w-3 h-3 rounded-full bg-indigo-600 animate-ping';
+                            titleEl.innerText = 'جاري استيراد الإكسل في الخلفية...';
+                            fileEl.innerText = job.file_name || 'ملف مخزون';
+                            barEl.style.width = (data.percentage || 0) + '%';
+                            statsEl.innerText = `${job.processed_rows || 0} / ${job.total_rows || '?'} صنف`;
+                            percentEl.innerText = (data.percentage || 0) + '%';
+                            newEl.innerText = job.imported_count || 0;
+                            updEl.innerText = job.updated_count || 0;
+                            rollbackBtn.classList.add('hidden');
+
+                            if (!pollTimer) {
+                                pollTimer = setInterval(checkBackgroundImportStatus, 2000);
+                            }
+                        } else if (job.status === 'completed') {
+                            const activeId = sessionStorage.getItem('active_import_job_id');
+                            if (String(job.id) !== String(lastCompletedJobId) && String(job.id) === String(activeId)) {
+                                widget.classList.remove('hidden');
+                                spinnerEl.className = 'inline-block w-3 h-3 rounded-full bg-emerald-500';
+                                titleEl.innerText = '✅ اكتمل الاستيراد في الخلفية!';
+                                fileEl.innerText = job.file_name || '';
+                                barEl.style.width = '100%';
+                                barEl.className = 'bg-emerald-500 h-2.5 rounded-full transition-all duration-300';
+                                statsEl.innerText = `اكتمل (${job.processed_rows} صنف)`;
+                                percentEl.innerText = '100%';
+                                newEl.innerText = job.imported_count || 0;
+                                updEl.innerText = job.updated_count || 0;
+                                if (job.snapshot_id) {
+                                    rollbackBtn.classList.remove('hidden');
+                                }
+
+                                if (typeof window.refreshInventoryTableSilently === 'function') {
+                                    window.refreshInventoryTableSilently();
+                                }
+                            }
+                            if (pollTimer) {
+                                clearInterval(pollTimer);
+                                pollTimer = null;
+                            }
+                        } else if (job.status === 'failed') {
+                            const activeId = sessionStorage.getItem('active_import_job_id');
+                            if (String(job.id) === String(activeId)) {
+                                widget.classList.remove('hidden');
+                                spinnerEl.className = 'inline-block w-3 h-3 rounded-full bg-rose-600';
+                                titleEl.innerText = '❌ تعذر استكمال الاستيراد';
+                                fileEl.innerText = job.error_message || 'حدث خطأ أثناء قراءة الملف';
+                            }
+                            if (pollTimer) {
+                                clearInterval(pollTimer);
+                                pollTimer = null;
+                            }
+                        }
+                    } catch (e) {
+                        // تجاهل أخطاء الشبكة العابرة أثناء التنقل
+                    }
+                }
+
+                window.dismissGlobalImportWidget = function () {
+                    const activeId = sessionStorage.getItem('active_import_job_id');
+                    if (activeId) {
+                        sessionStorage.setItem('dismissed_import_job_id', activeId);
+                        lastCompletedJobId = activeId;
+                    }
+                    document.getElementById('global-bg-import-widget').classList.add('hidden');
+                };
+
+                window.triggerGlobalRollback = async function () {
+                    if (!confirm('هل أنت متأكد من التراجع عن هذا الاستيراد واستعادة حالة المخزون السابقة فوراً؟')) return;
+                    try {
+                        const res = await fetch("{{ route('inventory.import.rollback') }}", {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                                'Accept': 'application/json',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            },
+                            body: JSON.stringify({})
+                        });
+                        const data = await res.json();
+                        alert(data.message || 'تم استرجاع المخزون السابق.');
+                        window.location.reload();
+                    } catch (e) {
+                        alert('حدث خطأ أثناء محاولة الاسترجاع.');
+                    }
+                };
+
+                window.startGlobalImportPolling = function (jobId) {
+                    if (jobId) {
+                        sessionStorage.setItem('active_import_job_id', jobId);
+                        sessionStorage.removeItem('dismissed_import_job_id');
+                    }
+                    checkBackgroundImportStatus();
+                    if (!pollTimer) {
+                        pollTimer = setInterval(checkBackgroundImportStatus, 1800);
+                    }
+                };
+
+                document.addEventListener('DOMContentLoaded', checkBackgroundImportStatus);
+            })();
+        </script>
+        @endauth
     </body>
 </html>

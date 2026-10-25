@@ -29,7 +29,7 @@
             <a href="{{ route('inventory.index') }}"
                class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('inventory.*') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">
                 <span>📦</span>
-                <span>{{ (auth()->check() && auth()->user()->role === 'admin') ? 'مخزوني / مخزون عميل' : 'المخزون' }}</span>
+                <span>{{ (auth()->check() && auth()->user()->role === 'admin') ? 'المخزون ' : 'المخزون' }}</span>
             </a>
 
             <!-- الرد الآلي والذكاء الاصطناعي -->
