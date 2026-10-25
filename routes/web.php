@@ -311,6 +311,44 @@ function getWordVariantsForSearch(string $word): array {
     return array_values(array_unique(array_filter($variants)));
 }
 
+/**
+ * القاموس القياسي الشامل لأسماء قطع غيار السيارات لضمان تعرف البوت عليها دائماً
+ * حتى لو لم تكن مضافة بعد في جدول item_keywords
+ */
+function getStandardAutoPartLexicon(): array {
+    $words = [
+        'صدام', 'صدامات', 'صدامه', 'صاجه', 'صاجات', 'بطانه', 'بطانات', 'رفرف', 'رفارف',
+        'كبوت', 'شنطه', 'باب', 'ابواب', 'شبك', 'شمعه', 'شمعات', 'نور', 'انوار', 'فانوس',
+        'اسطب', 'اصطب', 'اسطبات', 'اصطبات', 'سطب', 'كشاف', 'كشافات', 'مرايه', 'مرايا', 'مرايات',
+        'زجاج', 'قزاز', 'مساحه', 'مساحات', 'نسافه', 'نسافات', 'جسر', 'جسور', 'قاعده', 'قواعد',
+        'كلبس', 'كلبسات', 'فيبر', 'حشوه', 'سمكه', 'عتبه', 'هوايه', 'مفصل', 'مفصلات', 'قفل', 'كيلون', 'مقبض', 'يد',
+        'مساعد', 'مساعدات', 'جانبين', 'جمبين', 'مقص', 'مقصات', 'ذراع', 'اذرعه', 'اذرعة', 'جوزه', 'جوزات',
+        'مسمار', 'مسامير', 'توازن', 'عمود', 'عكس', 'عكوس', 'فلنجه', 'فلنجات', 'بيرنق', 'رمان', 'كفر', 'جنط', 'جنوط',
+        'فحمات', 'فحمه', 'قماشات', 'قماش', 'تيل', 'هوب', 'هوبات', 'كليبر', 'باكم', 'جلنط', 'سلك',
+        'رديتر', 'لديتر', 'اديتر', 'راديتر', 'رديترات', 'قربه', 'غطاء', 'مروحه', 'مراوح', 'دينمو', 'دينامو',
+        'كمبروسر', 'كمبرسر', 'كومبرسر', 'كمبريسور', 'ثلاجه', 'ثلاجات', 'فريون', 'لي', 'ليات', 'خرطوش', 'خراطيش',
+        'طرمبه', 'طرمبة', 'طرنبه', 'طرمبات', 'صفايه', 'صفاية', 'فلتر', 'فلاتر', 'بوجي', 'بواجي', 'كويل', 'كويلات',
+        'بخاخ', 'بخاخات', 'حساس', 'حساسات', 'سلف', 'مارش', 'بطاريه', 'ضفيره', 'كمبيوتر', 'فيوز', 'كتاوت',
+        'مكينه', 'ماكينه', 'محرك', 'قير', 'جير', 'دفرنس', 'دبل', 'كرونه', 'كارتير', 'كرتير', 'وجه', 'وجيه', 'صوفه', 'صوف',
+        'جنزير', 'شداد', 'سير', 'سيور', 'بكره', 'بكرات', 'ثروتل', 'بوابه', 'شكمان', 'دبه', 'تيربو',
+        'كرسي', 'كراسي', 'دركسون', 'طاره', 'دوده', 'طبلون', 'عداد', 'فرشه', 'ديكور', 'شاشه', 'ارباق', 'ايرباق', 'حزام'
+    ];
+    return array_values(array_unique(array_map('normalizeArabicSpelling', $words)));
+}
+
+/**
+ * قائمة الكلمات الفرعية/الملحقة بقطع الغيار (بحيث لا يخلط البوت بين الصدام نفسه وبين صاجة الصدام أو قاعدة الصدام)
+ */
+function getSubComponentPartWords(): array {
+    $subWords = [
+        'صاجه', 'صاجات', 'بطانه', 'بطانات', 'قاعده', 'قواعد', 'جسر', 'جسور',
+        'كلبس', 'كلبسات', 'برواز', 'اطار', 'غطاء', 'اغطيه', 'حشوه', 'فوم',
+        'زجاجه', 'عدسه', 'ظفيره', 'فيش', 'سلك', 'جلده', 'جلد', 'ربله', 'ربلات',
+        'مسطره', 'نيكل', 'زيج', 'لحيه', 'دقن', 'شبك', 'فتحه', 'كرسي', 'مفصل'
+    ];
+    return array_values(array_unique(array_map('normalizeArabicSpelling', $subWords)));
+}
+
 /*
 |--------------------------------------------------------------------------
 | 3. دوال فحص التوافق والمزامنة مع قلب النظام (Master Core & Multi-Car Sync)
@@ -1389,11 +1427,13 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         return mb_strlen(trim($w)) >= 2;
     }));
 
-    $modifiersList = getPartModifierWords();
-    $stopWordsList = getChatAndStopWords();
+    $modifiersList    = getPartModifierWords();
+    $stopWordsList    = getChatAndStopWords();
+    $subComponentsSet = getSubComponentPartWords();
 
-    $coreNounWords  = [];
-    $directionWords = [];
+    $coreNounWords          = [];
+    $directionWords         = [];
+    $requestedSubComponents = [];
 
     foreach ($allWords as $w) {
         $normW = normalizeArabicSpelling($w);
@@ -1404,8 +1444,18 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             $directionWords[] = $w;
         } else {
             $coreNounWords[] = $w;
+            $wVariants = getWordVariantsForSearch($normW);
+            foreach ($wVariants as $wv) {
+                $wvNoAl = (mb_strlen($wv) > 4 && str_starts_with($wv, 'ال')) ? mb_substr($wv, 2) : $wv;
+                if (in_array($wv, $subComponentsSet, true) || in_array($wvNoAl, $subComponentsSet, true)) {
+                    $requestedSubComponents[] = $wv;
+                    $requestedSubComponents[] = $wvNoAl;
+                }
+            }
         }
     }
+
+    $requestedSubComponents = array_values(array_unique($requestedSubComponents));
 
     if (empty($coreNounWords)) {
         return collect();
@@ -1454,7 +1504,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             ->toArray();
     }
 
-    $matched = $carCandidates->filter(function ($item) use ($coreNounWords, $directionWords, $year, $keywordsByNumber, $masterYearsByNumber) {
+    $matched = $carCandidates->filter(function ($item) use ($coreNounWords, $directionWords, $requestedSubComponents, $subComponentsSet, $year, $keywordsByNumber, $masterYearsByNumber) {
         $masterCompatYears = $masterYearsByNumber[$item->item_number] ?? null;
 
         if ($year !== '' && !isYearMatchingItem($year, $item->detected_years, $item->item_name, $masterCompatYears)) {
@@ -1467,6 +1517,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         // النص الكامل القابل للبحث يشمل اسم الصنف لدى العميل + كل مرادفات القاموس التراكمي لنفس الرقم الموحد
         $fullSearchableText = $itemNameNorm . ' ' . $itemKeywords;
         $searchableTokens   = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $fullSearchableText, -1, PREG_SPLIT_NO_EMPTY);
+        $itemNameTokens     = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $itemNameNorm, -1, PREG_SPLIT_NO_EMPTY);
 
         // التحقق من وجود الكلمات الأساسية للقطعة (مع مرادفاتها وجموعها)
         foreach ($coreNounWords as $coreWord) {
@@ -1474,7 +1525,6 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             $foundCore = false;
 
             foreach ($variants as $v) {
-                // تطابق كلمة كاملة أو جذر واضح داخل كلمات الصنف والمرادفات
                 foreach ($searchableTokens as $token) {
                     $tokenNoAl = (mb_strlen($token) > 4 && str_starts_with($token, 'ال')) ? mb_substr($token, 2) : $token;
                     $vNoAl     = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
@@ -1492,6 +1542,17 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
 
             if (!$foundCore) {
                 return false;
+            }
+        }
+
+        // منع الخلط بين القطعة الأساسية والقطعة الفرعية:
+        // إذا طلب الزبون "صدام امامي" فقط (ولم يطلب صاجة أو بطانة أو قاعدة أو جسر)، نستبعد الأصناف التي هي عبارة عن "صاجة صدام" أو "قاعدة صدام"
+        if (empty($requestedSubComponents)) {
+            foreach ($itemNameTokens as $iToken) {
+                $iTokenNoAl = (mb_strlen($iToken) > 4 && str_starts_with($iToken, 'ال')) ? mb_substr($iToken, 2) : $iToken;
+                if (in_array($iToken, $subComponentsSet, true) || in_array($iTokenNoAl, $subComponentsSet, true)) {
+                    return false;
+                }
             }
         }
 
@@ -1519,6 +1580,31 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         }
 
         return true;
+    })->sortByDesc(function ($item) use ($singlePartRequest, $coreNounWords) {
+        // ترتيب النتائج بالأولوية للأصناف المطابقة تماماً لعبارة العميل في اسم الصنف نفسه
+        $itemNameNorm = normalizeArabicSpelling($item->item_name);
+        $reqNorm      = normalizeArabicSpelling($singlePartRequest);
+        $score        = 0;
+
+        if (mb_stripos($itemNameNorm, $reqNorm) !== false) {
+            $score += 100;
+        }
+
+        $directNounHits = 0;
+        foreach ($coreNounWords as $cw) {
+            foreach (getWordVariantsForSearch($cw) as $v) {
+                if (mb_stripos($itemNameNorm, $v) !== false) {
+                    $directNounHits++;
+                    break;
+                }
+            }
+        }
+        $score += ($directNounHits * 25);
+
+        // تفضيل الاسم الأقصر والأدق عند تساوي التطابق
+        $score -= mb_strlen($itemNameNorm) * 0.1;
+
+        return $score;
     })->take(3)->values();
 
     return $matched;
@@ -1527,6 +1613,28 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
 /**
  * تحليل رسالة الزبون واستخراج أرقام القطع والسيارة والسنة والأصناف المطلوبة بدقة
  */
+function replaceWholeWordArabicSafe(string $subject, string $search): string {
+    $search = trim($search);
+    if ($search === '') return $subject;
+    // استبدال الكلمة فقط إذا كانت محاطة بحدود كلمات أو مسافات لمنع قص حروف من كلمات مثل (صدام / صاجة)
+    $pattern = '/(?<=^|[\s,،\-\+\/\(\)\*\.])' . preg_quote($search, '/') . '(?=$|[\s,،\-\+\/\(\)\*\.])/iu';
+    return preg_replace($pattern, ' ', $subject);
+}
+
+function containsWholeWordArabicSafe(string $subject, string $search): bool {
+    $search = trim($search);
+    if ($search === '') return false;
+    $pattern = '/(?<=^|[\s,،\-\+\/\(\)\*\.])' . preg_quote($search, '/') . '(?=$|[\s,،\-\+\/\(\)\*\.])/iu';
+    if (preg_match($pattern, $subject)) {
+        return true;
+    }
+    // فحص إضافي بعد توحيد الهمزات والتاء المربوطة
+    $normSubject = normalizeArabicSpelling($subject);
+    $normSearch  = normalizeArabicSpelling($search);
+    $normPattern = '/(?<=^|[\s,،\-\+\/\(\)\*\.])' . preg_quote($normSearch, '/') . '(?=$|[\s,،\-\+\/\(\)\*\.])/iu';
+    return (bool) preg_match($normPattern, $normSubject);
+}
+
 function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     $normText         = normalizeArabicDigits($text);
     $detectedCar      = null;
@@ -1557,40 +1665,40 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
                 ->exists();
             if ($existsAsNumber) {
                 $extractedPartNumbers[] = $cleanTk;
-                $remainingText = str_ireplace($tk, ' ', $remainingText);
+                $remainingText = replaceWholeWordArabicSafe($remainingText, $tk);
             }
         }
     }
     $extractedPartNumbers = array_values(array_unique($extractedPartNumbers));
 
-    // 2. استخراج السيارة ومرادفاتها (مع مطابقة الكلمات الموحدة)
+    // 2. استخراج السيارة ومرادفاتها (مع مطابقة الكلمات الكاملة فقط لمنع قص حروف القطع مثل صدام أو صاجة)
     $carsList = DB::table('cars')->get();
     foreach ($carsList as $car) {
-        if (mb_stripos($remainingText, $car->car_name) !== false) {
+        if (containsWholeWordArabicSafe($remainingText, $car->car_name)) {
             $detectedCar      = $car->car_name;
             $detectedCategory = $car->category;
-            $remainingText    = str_ireplace($car->car_name, ' ', $remainingText);
+            $remainingText    = replaceWholeWordArabicSafe($remainingText, $car->car_name);
             if (!empty($car->category)) {
-                $remainingText = str_ireplace($car->category, ' ', $remainingText);
+                $remainingText = replaceWholeWordArabicSafe($remainingText, $car->category);
             }
             break;
         }
         $aliases = DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray();
         foreach ($aliases as $alias) {
-            if ($alias !== '' && mb_stripos($remainingText, $alias) !== false) {
+            if ($alias !== '' && containsWholeWordArabicSafe($remainingText, $alias)) {
                 $detectedCar      = $car->car_name;
                 $detectedCategory = $car->category;
-                $remainingText    = str_ireplace($alias, ' ', $remainingText);
+                $remainingText    = replaceWholeWordArabicSafe($remainingText, $alias);
                 if (!empty($car->category)) {
-                    $remainingText = str_ireplace($car->category, ' ', $remainingText);
+                    $remainingText = replaceWholeWordArabicSafe($remainingText, $car->category);
                 }
                 break 2;
             }
         }
     }
     foreach ($carsList as $car) {
-        if (!empty($car->category) && mb_stripos($remainingText, $car->category) !== false) {
-            $remainingText = str_ireplace($car->category, ' ', $remainingText);
+        if (!empty($car->category) && containsWholeWordArabicSafe($remainingText, $car->category)) {
+            $remainingText = replaceWholeWordArabicSafe($remainingText, $car->category);
         }
     }
 
@@ -1641,7 +1749,7 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
                 continue;
             }
 
-            // معالجة واو العطف الملتصقة بالكلمة (مثل: ورديتر أو ويمين)
+            // معالجة واو العطف الملتصقة بالكلمة (مثل: وصدام أو ورديتر أو ويمين)
             if (mb_strlen($tokClean) >= 4 && mb_substr($tokClean, 0, 1) === 'و') {
                 $withoutWaw     = mb_substr($tokClean, 1);
                 $normWithoutWaw = normalizeArabicSpelling($withoutWaw);
@@ -1656,6 +1764,9 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
                 if ($isKnownPart && !empty($currentPhrase)) {
                     $partsList[]   = implode(' ', $currentPhrase);
                     $currentPhrase = [$withoutWaw];
+                    continue;
+                } elseif ($isKnownPart && empty($currentPhrase)) {
+                    $currentPhrase[] = $withoutWaw;
                     continue;
                 }
             }
@@ -1683,8 +1794,7 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
 }
 
 /**
- * فحص دقيق: هل الكلمة معروفة كاسم قطعة غيار في قاموس المرادفات (item_keywords) أو في المرادفات القياسية؟
- * (بدون استخدام LIKE العشوائي على أجزاء الكلمات القصيرة)
+ * فحص دقيق: هل الكلمة معروفة كاسم قطعة غيار في القاموس القياسي أو قاموس المرادفات (item_keywords) أو أصناف التاجر؟
  */
 function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null): bool {
     $norm = normalizeArabicSpelling($word);
@@ -1692,13 +1802,22 @@ function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null
         return false;
     }
 
-    $variants = getWordVariantsForSearch($norm);
+    $variants        = getWordVariantsForSearch($norm);
+    $standardLexicon = getStandardAutoPartLexicon();
+
+    // 0. فحص فوري في القاموس القياسي الشامل لقطع الغيار (مثل صدام، صاجة، شمعة، رفرف، رديتر...)
+    foreach ($variants as $v) {
+        $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
+        if (in_array($v, $standardLexicon, true) || in_array($vNoAl, $standardLexicon, true)) {
+            return true;
+        }
+    }
 
     // 1. فحص في جدول قاموس الكلمات المفتاحية (تطابق تام للكلمة الموحدة)
     $allKeywords = DB::table('item_keywords')->pluck('keyword')->toArray();
     foreach ($allKeywords as $kw) {
-        $kwNorm   = normalizeArabicSpelling($kw);
-        $kwNoAl   = (mb_strlen($kwNorm) > 4 && str_starts_with($kwNorm, 'ال')) ? mb_substr($kwNorm, 2) : $kwNorm;
+        $kwNorm = normalizeArabicSpelling($kw);
+        $kwNoAl = (mb_strlen($kwNorm) > 4 && str_starts_with($kwNorm, 'ال')) ? mb_substr($kwNorm, 2) : $kwNorm;
         foreach ($variants as $v) {
             $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
             if ($kwNorm === $v || $kwNoAl === $vNoAl) {
@@ -1707,22 +1826,26 @@ function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null
         }
     }
 
-    // 2. فحص في أسماء الأصناف الخاصة بالتاجر (تطابق كلمة كاملة وليس حرفين داخل كلمة أخرى)
+    // 2. فحص في أسماء الأصناف الخاصة بالتاجر أو في قلب النظام العام (master_items)
+    $itemNamesPool = [];
     if ($ownerUserId !== null) {
-        $userItemNames = DB::table('items')
+        $itemNamesPool = DB::table('items')
             ->where('user_id', $ownerUserId)
             ->pluck('item_name')
             ->toArray();
+    }
+    if (empty($itemNamesPool)) {
+        $itemNamesPool = DB::table('master_items')->limit(1000)->pluck('first_item_name')->toArray();
+    }
 
-        foreach ($userItemNames as $iName) {
-            $tokens = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', normalizeArabicSpelling($iName), -1, PREG_SPLIT_NO_EMPTY);
-            foreach ($tokens as $tk) {
-                $tkNoAl = (mb_strlen($tk) > 4 && str_starts_with($tk, 'ال')) ? mb_substr($tk, 2) : $tk;
-                foreach ($variants as $v) {
-                    $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
-                    if ($tk === $v || ($tkNoAl === $vNoAl && mb_strlen($vNoAl) >= 3)) {
-                        return true;
-                    }
+    foreach ($itemNamesPool as $iName) {
+        $tokens = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', normalizeArabicSpelling($iName), -1, PREG_SPLIT_NO_EMPTY);
+        foreach ($tokens as $tk) {
+            $tkNoAl = (mb_strlen($tk) > 4 && str_starts_with($tk, 'ال')) ? mb_substr($tk, 2) : $tk;
+            foreach ($variants as $v) {
+                $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
+                if ($tk === $v || ($tkNoAl === $vNoAl && mb_strlen($vNoAl) >= 3)) {
+                    return true;
                 }
             }
         }
@@ -1734,7 +1857,6 @@ function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null
 /**
  * دالة التحقق الذكية الصارمة:
  * هل رسالة الزبون تمثل استعلاماً حقيقياً عن قطع غيار أم مجرد تحية/دردشة؟
- * - إذا كتب "السلام عليكم" أو "كيفك" أو حتى "ابغى اسألك" بدون ذكر اسم قطعة، يرجع false فلا يرد البوت إطلاقاً.
  */
 function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ownerUserId): bool {
     // 1. إذا أرسل رقم قطعة صريح -> استعلام حقيقي
@@ -1742,7 +1864,7 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
         return true;
     }
 
-    // 2. إذا لم يتبقَّ أي كلمات بعد حذف التحيات والسيارة والموديل -> ليست طلب قطعة (حتى لو ذكر السلام عليكم أو اسم سيارة فقط بدون قطعة)
+    // 2. إذا لم يتبقَّ أي كلمات بعد حذف التحيات والسيارة والموديل -> ليست طلب قطعة
     if (empty($parsed['parts_list'])) {
         return false;
     }
@@ -1762,22 +1884,23 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
         }
     }
 
-    // 4. إذا كتب الزبون كلمة طلب صريحة (مثل: ابغى، مطلوب، عندكم، قطعة) + كتب معها اسم قطعة (حتى لو كانت القطعة غير متوفرة في المخزون، ليرد عليه البوت بأنها غير متوفرة أو يسأله عن السيارة)
+    // 4. إذا كتب الزبون كلمة طلب صريحة (مثل: ابغى، مطلوب، عندكم، قطعة) أو أرسل سيارة/موديل مع اسم قطعة
     $normMsg = normalizeArabicSpelling($messageText);
-    $explicitIntentWords = ['قطعه', 'قطع', 'غيار', 'ابغي', 'ابغا', 'ابي', 'عندكم', 'متوفر', 'يتوفر', 'احصل', 'مطلوب', 'بغيت', 'احتاج', 'اريد'];
-    $hasExplicitTrigger  = false;
+    $explicitIntentWords = ['قطعه', 'قطع', 'غيار', 'ابغي', 'ابغا', 'ابي', 'عندكم', 'متوفر', 'يتوفر', 'احصل', 'مطلوب', 'بغيت', 'احتاج', 'اريد', 'بكم', 'سعر'];
+    $hasExplicitTrigger  = (!empty($parsed['car']) || !empty($parsed['year']));
 
-    $msgTokens = preg_split('/[\s,،\?\!]+/u', $normMsg, -1, PREG_SPLIT_NO_EMPTY);
-    foreach ($explicitIntentWords as $intentWord) {
-        $normIntent = normalizeArabicSpelling($intentWord);
-        if (in_array($normIntent, $msgTokens, true) || in_array('و' . $normIntent, $msgTokens, true)) {
-            $hasExplicitTrigger = true;
-            break;
+    if (!$hasExplicitTrigger) {
+        $msgTokens = preg_split('/[\s,،\?\!]+/u', $normMsg, -1, PREG_SPLIT_NO_EMPTY);
+        foreach ($explicitIntentWords as $intentWord) {
+            $normIntent = normalizeArabicSpelling($intentWord);
+            if (in_array($normIntent, $msgTokens, true) || in_array('و' . $normIntent, $msgTokens, true)) {
+                $hasExplicitTrigger = true;
+                break;
+            }
         }
     }
 
     if ($hasExplicitTrigger && !empty($parsed['parts_list'])) {
-        // نتأكد أن ما تبقى في parts_list ليس مجرد اتجاهات فقط بل يحتوي على اسم
         foreach ($parsed['parts_list'] as $partPhrase) {
             $words = preg_split('/\s+/u', $partPhrase, -1, PREG_SPLIT_NO_EMPTY);
             foreach ($words as $w) {
@@ -2898,13 +3021,18 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حذف العميل وجميع أصنافه بنجاح.');
     })->name('clients.destroy');
 
-    // 3. المخزون المشترك (قلب النظام) - مع تنظيف الأصناف اليتيمة والمكررة لضمان دقة الكميات 100%
-    Route::get('/master-catalog', function () {
+    // 3. المخزون المشترك (قلب النظام) - سريع جداً مع دعم البحث وتقسيم الصفحات (Pagination)
+    Route::get('/master-catalog', function (Request $request) {
         if (auth()->user()->role !== 'admin') abort(403);
 
-        syncAllExistingItemsToCore();
+        // لا يتم تشغيل المزامنة الشاملة إلا عند الضغط على زر المزامنة أو إذا كان الجدول فارغاً
+        if ($request->boolean('sync') || DB::table('master_items')->count() === 0) {
+            syncAllExistingItemsToCore();
+        }
 
-        $masterItems = DB::table('master_items')
+        $search = trim((string) $request->query('search', ''));
+
+        $query = DB::table('master_items')
             ->join('items', 'master_items.item_number', '=', 'items.item_number')
             ->join('users', 'items.user_id', '=', 'users.id')
             ->select(
@@ -2914,15 +3042,26 @@ Route::middleware('auth')->group(function () {
                 'master_items.compatible_years',
                 DB::raw('COALESCE(SUM(items.quantity), 0) as total_quantity'),
                 DB::raw('COUNT(DISTINCT items.user_id) as clients_count')
-            )
-            ->groupBy(
+            );
+
+        if ($search !== '') {
+            $query->where(function ($q) use ($search) {
+                $q->where('master_items.item_number', 'like', "%{$search}%")
+                  ->orWhere('master_items.first_item_name', 'like', "%{$search}%")
+                  ->orWhere('master_items.compatible_cars', 'like', "%{$search}%")
+                  ->orWhere('items.item_name', 'like', "%{$search}%");
+            });
+        }
+
+        $masterItems = $query->groupBy(
                 'master_items.item_number',
                 'master_items.first_item_name',
                 'master_items.compatible_cars',
                 'master_items.compatible_years'
             )
             ->orderByDesc('total_quantity')
-            ->get();
+            ->paginate(50)
+            ->withQueryString();
 
         return view('pages.master_catalog', compact('masterItems'));
     })->name('master.catalog');
