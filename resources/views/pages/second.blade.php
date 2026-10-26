@@ -13,7 +13,7 @@
                     🤖 مساعد الذكاء الاصطناعي والواتساب
                 </h2>
                 <p class="text-sm text-slate-500 mt-1">
-                    البوت محمي تلقائياً: يتحكم في القروبات حسب اختيارك بالأسفل، ولا يرد على التحيات العادية (مثل السلام عليكم)، ويتعرف فوراً على أرقام الأصناف أو الطلبات المتعددة في رسالة واحدة.
+                    يعتمد البوت حصرياً على المصادر الثلاثة (الكلمات المفتاحية لأصناف مخزونك الخاص + اسم السيارة + سنة الصنع)، مع نظام نسبة التطابق الذكي واقتراح "هل تقصد؟".
                 </p>
             </div>
             @if(($botSettings['allow_group_replies'] ?? '0') === '1')
@@ -32,7 +32,7 @@
                 type="text"
                 name="message"
                 value="{{ $customerMessage }}"
-                placeholder="جرب البحث برقم الصنف مباشرة (مثال: 90919-01289) أو عدة أصناف (مثال: بواجي و فحمات كامري 25)..."
+                placeholder="جرب البحث برقم الصنف أو اسم القطعة (مثال: فلتر زيت كامري 25 أو صدام امامي كامري 25)..."
                 class="flex-1 border border-slate-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
             >
 
@@ -45,14 +45,22 @@
     </div>
 
     @if($customerMessage)
+        @php
+            $directMin  = (int) ($botSettings['confidence_direct_threshold'] ?? 80);
+            $suggestMin = (int) ($botSettings['confidence_suggest_threshold'] ?? 40);
+        @endphp
         <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
 
             <h3 class="font-bold text-slate-700">
-                نتيجة تعرف النظام على رسالة الزبون من مخزونك:
+                نتيجة تعرف النظام ونسبة التطابق الذكي من مخزونك:
             </h3>
 
             @forelse($matchedItems as $item)
-                <div class="p-4 bg-emerald-50 border border-emerald-200 rounded-lg flex justify-between items-center gap-4">
+                @php
+                    $score = (int) ($item->confidence_score ?? 100);
+                    $isDirect = $score >= $directMin;
+                @endphp
+                <div class="p-4 {{ $isDirect ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200' }} border rounded-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                     <div>
                         <p class="font-bold text-slate-800">
                             {{ $item->item_name }}
@@ -61,7 +69,7 @@
                             </span>
                         </p>
 
-                        <p class="text-xs text-emerald-700 mt-1">
+                        <p class="text-xs {{ $isDirect ? 'text-emerald-700' : 'text-amber-800' }} mt-1">
                             السيارة: {{ $item->detected_car_name ?? 'غير محدد' }}
                             |
                             الموديل: {{ $item->detected_years ?? 'غير محدد' }}
@@ -72,13 +80,18 @@
                         </p>
                     </div>
 
-                    <span class="text-xs bg-emerald-600 text-white px-3 py-1 rounded-full">
-                        تم التعرف بنجاح
-                    </span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-bold px-3 py-1 rounded-full {{ $isDirect ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white' }}">
+                            نسبة التطابق: {{ $score }}%
+                        </span>
+                        <span class="text-xs px-3 py-1 rounded-full font-semibold {{ $isDirect ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900' }}">
+                            {{ $isDirect ? '✅ إجابة مباشرة بالتوفر' : '🤔 يرد بـ: هل تقصد؟' }}
+                        </span>
+                    </div>
                 </div>
             @empty
-                <p class="text-sm text-rose-600">
-                    لم يتم العثور على صنف مطابق لهذه الكلمات في مخزونك الخاص.
+                <p class="text-sm text-rose-600 font-semibold">
+                    لم يتم العثور على صنف مطابق لهذه الكلمات في الكلمات المفتاحية لمخزونك الخاص.
                 </p>
             @endforelse
 
@@ -89,9 +102,9 @@
     <div class="bg-indigo-50 p-5 rounded-xl border border-indigo-200">
         <div class="flex items-center justify-between mb-3">
             <h3 class="text-sm font-bold text-indigo-900">
-                📌 قائمة الدوال الذكية الموحدة (اضغط على أي دالة لنسخها واستخدامها في أي خانة بالأسفل):
+                📌 قائمة المتغيرات والدوال الذكية الموحدة (اضغط على أي دالة لنسخها واستخدامها في أي خانة بالأسفل):
             </h3>
-            <span class="text-xs text-indigo-700 font-semibold">تعمل في جميع الخانات بدون استثناء</span>
+            <span class="text-xs text-indigo-700 font-semibold">تعمل في جميع الخانات بما فيها خانة "هل تقصد؟"</span>
         </div>
 
         <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 text-xs">
@@ -144,6 +157,21 @@
                 <code class="font-bold text-indigo-700 block">{items}</code>
                 <span class="text-slate-600">قائمة الأصناف المطابقة</span>
             </button>
+
+            <button type="button" onclick="copyTag('{suggested_item}')" class="bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg p-2 text-right transition">
+                <code class="font-bold text-amber-800 block">{suggested_item}</code>
+                <span class="text-slate-700">اسم الصنف المقترح (هل تقصد)</span>
+            </button>
+
+            <button type="button" onclick="copyTag('{suggested_list}')" class="bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg p-2 text-right transition">
+                <code class="font-bold text-amber-800 block">{suggested_list}</code>
+                <span class="text-slate-700">قائمة الأصناف المقترحة بالأسعار</span>
+            </button>
+
+            <button type="button" onclick="copyTag('{confidence}')" class="bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg p-2 text-right transition">
+                <code class="font-bold text-amber-800 block">{confidence}</code>
+                <span class="text-slate-700">نسبة التطابق المئوية (%)</span>
+            </button>
         </div>
     </div>
 
@@ -152,7 +180,7 @@
         <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
             <div>
                 <h3 class="text-lg font-bold text-slate-800">
-                    💬 إعدادات ربط الواتساب وقوالب الرد الآلي وحد الاستعلام ({{ auth()->user()->name }})
+                    💬 إعدادات ربط الواتساب ونسب الذكاء وقوالب الرد الآلي ({{ auth()->user()->name }})
                 </h3>
                 <p class="text-xs text-amber-700 font-semibold mt-1">
                     💡 ملاحظة: إذا تركت أي خانة فارغة تماماً فلن يقوم البوت بالرد في تلك الحالة. وعند توفر عدة أصناف في نفس الرسالة يكرر البوت قالب التوفر لكل صنف، بينما يرسل قالب عدم التوفر مرة واحدة فقط.
@@ -215,6 +243,69 @@
                 </div>
             </div>
 
+            <!-- إعدادات نظام الذكاء ونسب التطابق المئوية (Confidence Thresholds) + خانة "هل تقصد؟" -->
+            <div class="p-5 bg-indigo-50/50 rounded-xl border border-indigo-200 space-y-4">
+                <div>
+                    <h4 class="text-sm font-bold text-indigo-950">
+                        🎯 نظام الذكاء ونسبة التطابق المئوية (تحديد متى يجيب البوت مباشرة ومتى يسأل "هل تقصد؟")
+                    </h4>
+                    <p class="text-xs text-slate-600 mt-1">
+                        كلما تطابقت كلمات العميل واتجاه القطعة مع الكلمات المفتاحية لأصنافك ترتفع النسبة إلى 80% أو 100% فيجيب البوت فوراً، أما إذا كانت النسبة متوسطة (مثل 40% أو 60%) فيسأله البوت بالصيغة التي تضعها في خانة "هل تقصد؟".
+                    </p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-bold text-slate-800 mb-1">
+                            ✅ نسبة الإجابة المباشرة بالتوفر والسعر (من % إلى 100%) :
+                        </label>
+                        <input
+                            type="number"
+                            min="1"
+                            max="100"
+                            name="confidence_direct_threshold"
+                            value="{{ $botSettings['confidence_direct_threshold'] ?? '80' }}"
+                            class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-500 font-bold text-emerald-700"
+                        />
+                        <span class="text-xs text-slate-500 mt-1 block">
+                            مثال: ضع <strong>80</strong> ليقوم البوت بالرد المباشر إذا وصلت دقة التعرف على القطعة إلى 80% أو 100%.
+                        </span>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-slate-800 mb-1">
+                            🤔 الحد الأدنى لنسبة الاقتراح وسؤال "هل تقصد؟" (%) :
+                        </label>
+                        <input
+                            type="number"
+                            min="1"
+                            max="100"
+                            name="confidence_suggest_threshold"
+                            value="{{ $botSettings['confidence_suggest_threshold'] ?? '40' }}"
+                            class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-500 font-bold text-amber-700"
+                        />
+                        <span class="text-xs text-slate-500 mt-1 block">
+                            مثال: ضع <strong>40</strong> ليرسل البوت رسالة "هل تقصد؟" عندما تكون النسبة بين 40% وأقل من نسبة الإجابة المباشرة.
+                        </span>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-bold text-slate-800 mb-1">
+                        💡 5. رد البوت عند الشك أو التشابه الجزئي (رسالة "هل تقصد كذا وكذا؟") :
+                    </label>
+                    <textarea
+                        name="reply_did_you_mean"
+                        rows="3"
+                        placeholder="مثال: هل تقصد ({suggested_item}) لسيارة {car} موديل {year}؟ يرجى الرد بـ (نعم) للتأكيد."
+                        class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-500"
+                    >{{ $botSettings['reply_did_you_mean'] ?? '' }}</textarea>
+                    <span class="text-xs text-indigo-700 mt-1 block font-semibold">
+                        يمكنك استخدام المتغيرات: <code>{suggested_item}</code> لاسم الصنف المقترح، أو <code>{suggested_list}</code> لقائمة المقترحات مع السعر، و<code>{confidence}</code> لنسبة التطابق، و<code>{part}</code> و<code>{car}</code> و<code>{year}</code>. وإذا رد الزبون بـ (نعم / ايوه / صح) سيرسل له البوت تفاصيل القطعة وسعرها تلقائياً!
+                    </span>
+                </div>
+            </div>
+
             <!-- إعدادات الحد الأقصى للاستعلام لكل عميل يراسل البوت -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-amber-50/60 rounded-xl border border-amber-200">
                 <div>
@@ -229,7 +320,7 @@
                 </div>
             </div>
 
-            <!-- خانات الردود الأربعة -->
+            <!-- خانات الردود الأربعة الأساسية -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <!-- خانة الرد في حال التوفر -->
                 <div>
@@ -258,7 +349,7 @@
 
             <div class="pt-2">
                 <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 px-6 rounded-lg text-sm transition">
-                    💾 حفظ جميع إعدادات البوت والربط
+                    💾 حفظ جميع إعدادات البوت ونسب الذكاء والربط
                 </button>
             </div>
         </form>
@@ -388,6 +479,7 @@
                         <th class="p-3">السيارة المكتشفة</th>
                         <th class="p-3">سنة الصنع</th>
                         <th class="p-3">الأصناف المطلوبة (المحفوظة)</th>
+                        <th class="p-3">حالة الجلسة</th>
                         <th class="p-3">إجمالي المحادثة المحفوظة</th>
                         <th class="p-3">إجراء</th>
                     </tr>
@@ -411,6 +503,13 @@
                                 @endif
                             </td>
                             <td class="p-3 font-semibold">{{ $sess->part_query }}</td>
+                            <td class="p-3">
+                                @if(!empty($sess->pending_suggestion_ids))
+                                    <span class="bg-amber-100 text-amber-900 px-2 py-0.5 rounded text-xs font-bold">بانتظار تأكيد (هل تقصد؟)</span>
+                                @else
+                                    <span class="bg-blue-100 text-blue-800 px-2 py-0.5 rounded text-xs">استكمال بيانات</span>
+                                @endif
+                            </td>
                             <td class="p-3 text-slate-500 text-xs">{{ $sess->full_conversation }}</td>
                             <td class="p-3">
                                 <form action="{{ route('pages.second.session.delete', $sess->id) }}" method="POST">
@@ -422,7 +521,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="6" class="p-4 text-center text-slate-400">لا توجد محادثات معلقة في الذاكرة حالياً.</td>
+                            <td colspan="7" class="p-4 text-center text-slate-400">لا توجد محادثات معلقة في الذاكرة حالياً.</td>
                         </tr>
                     @endforelse
                 </tbody>

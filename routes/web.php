@@ -44,13 +44,21 @@ try {
             $table->string('detected_car')->nullable();
             $table->string('detected_year')->nullable();
             $table->text('part_query')->nullable();
+            $table->text('pending_suggestion_ids')->nullable();
             $table->text('full_conversation')->nullable();
             $table->timestamps();
         });
-    } elseif (!Schema::hasColumn('whatsapp_sessions', 'user_id')) {
-        Schema::table('whatsapp_sessions', function (Blueprint $table) {
-            $table->unsignedBigInteger('user_id')->default(1)->index();
-        });
+    } else {
+        if (!Schema::hasColumn('whatsapp_sessions', 'user_id')) {
+            Schema::table('whatsapp_sessions', function (Blueprint $table) {
+                $table->unsignedBigInteger('user_id')->default(1)->index();
+            });
+        }
+        if (!Schema::hasColumn('whatsapp_sessions', 'pending_suggestion_ids')) {
+            Schema::table('whatsapp_sessions', function (Blueprint $table) {
+                $table->text('pending_suggestion_ids')->nullable();
+            });
+        }
     }
 
     if (!Schema::hasTable('whatsapp_customer_quotas')) {
@@ -205,6 +213,50 @@ function getPartModifierWords(): array {
 }
 
 /**
+ * الكلمات المحمية الخاصة بقطع الغيار التي يُمنع حذفها أبداً حتى لو تشابهت مع فئة سيارة
+ * (تمنع مشكلة حذف كلمة "زيت" أو "هواء" أو "مكينة" عند تحليل رسالة العميل)
+ */
+function getProtectedPartWords(): array {
+    $words = [
+        'زيت', 'هواء', 'هوا', 'مكيف', 'بنزين', 'وقود', 'قير', 'جير', 'مكينه', 'ماكينه', 'محرك',
+        'فرامل', 'بريك', 'دركسون', 'طاره', 'ماء', 'مويه', 'رديتر', 'لديتر', 'اديتر', 'راديتر',
+        'فحمات', 'فحمه', 'قماشات', 'قماش', 'تيل', 'هوب', 'هوبات', 'صدام', 'صدامات',
+        'صاجه', 'صاجات', 'بطانه', 'بطانات', 'رفرف', 'رفارف', 'كبوت', 'شنطه', 'باب', 'ابواب',
+        'شبك', 'شمعه', 'شمعات', 'نور', 'انوار', 'فانوس', 'اسطب', 'اصطب', 'اسطبات', 'اصطبات',
+        'كشاف', 'كشافات', 'مرايه', 'مرايا', 'مرايات', 'زجاج', 'قزاز', 'مساحه', 'مساحات',
+        'نسافه', 'نسافات', 'جسر', 'جسور', 'قاعده', 'قواعد', 'كلبس', 'كلبسات', 'فيبر', 'حشوه',
+        'سمكه', 'عتبه', 'هوايه', 'مفصل', 'مفصلات', 'قفل', 'كيلون', 'مقبض', 'يد', 'مساعد',
+        'مساعدات', 'جانبين', 'جمبين', 'مقص', 'مقصات', 'ذراع', 'اذرعه', 'جوزه', 'جوزات',
+        'مسمار', 'مسامير', 'توازن', 'عمود', 'عكس', 'عكوس', 'فلنجه', 'فلنجات', 'بيرنق', 'رمان',
+        'كفر', 'جنط', 'جنوط', 'كليبر', 'باكم', 'جلنط', 'سلك', 'قربه', 'غطاء', 'مروحه', 'مراوح',
+        'دينمو', 'دينامو', 'كمبروسر', 'كمبرسر', 'ثلاجه', 'ثلاجات', 'فريون', 'لي', 'ليات',
+        'خرطوش', 'خراطيش', 'طرمبه', 'طرمبات', 'صفايه', 'فلتر', 'فلاتر', 'بوجي', 'بواجي',
+        'كويل', 'كويلات', 'بخاخ', 'بخاخات', 'حساس', 'حساسات', 'سلف', 'مارش', 'بطاريه',
+        'ضفيره', 'كمبيوتر', 'فيوز', 'كتاوت', 'دفرنس', 'دبل', 'كرونه', 'كارتير', 'كرتير',
+        'وجه', 'وجيه', 'صوفه', 'صوف', 'جنزير', 'شداد', 'سير', 'سيور', 'بكره', 'بكرات',
+        'ثروتل', 'بوابه', 'شكمان', 'دبه', 'تيربو', 'كرسي', 'كراسي', 'دوده', 'طبلون', 'عداد',
+        'فرشه', 'ديكور', 'شاشه', 'ارباق', 'ايرباق', 'حزام'
+    ];
+    return array_values(array_unique(array_map('normalizeArabicSpelling', $words)));
+}
+
+/**
+ * الكلمات المتضادة في فئة الفلاتر والسوائل والأنظمة لمنع خلط (فلتر زيت) بـ (فلتر هواء) أو (فلتر مكيف)
+ */
+function getMutuallyExclusivePartSpecifiers(): array {
+    $groups = [
+        ['زيت'],
+        ['هواء', 'هوا'],
+        ['مكيف', 'فريون', 'ثلاجه'],
+        ['بنزين', 'وقود', 'ديزل'],
+        ['قير', 'جير', 'دفرنس'],
+        ['دركسون', 'باور'],
+        ['مكينه', 'ماكينه', 'محرك'],
+    ];
+    return array_map(fn($g) => array_map('normalizeArabicSpelling', $g), $groups);
+}
+
+/**
  * قائمة شاملة لكلمات التحية، الدردشة، التوقف، والكلمات العامة التي لا تعتبر أسماء قطع غيار أبداً
  */
 function getChatAndStopWords(): array {
@@ -227,7 +279,7 @@ function getChatAndStopWords(): array {
         'بكم', 'كم', 'سعر', 'سعرها', 'سعره', 'اسعار', 'أسعار', 'قيمة', 'قيمه', 'تكلف', 'يكلف',
         'هل', 'فيه', 'في', 'فبه', 'هذا', 'هذه', 'هذي', 'ذا', 'ذيك', 'الي', 'اللي', 'الذي', 'التي',
         'سيارة', 'سياره', 'السيارة', 'السياره', 'موديل', 'مديل', 'سنة', 'سنه', 'صنع', 'حقت', 'حق', 'تبع', 'للسيارة',
-        'قطعة', 'قطعه', 'قطع', 'غيار', 'صنف', 'رقم', 'كود',
+        'قطعة', 'قطعه', 'قطع', 'غيار', 'صنف', 'رقم', 'كود', 'نوع', 'سيارتك', 'سيارتي',
         // أسئلة عامة عن المحل والدوام والموقع
         'وين', 'فين', 'موقعكم', 'موقعك', 'الموقع', 'عنوانكم', 'فرعكم', 'فاتحين', 'تفتحون', 'تقفلون', 'دوامكم', 'اللوكيشن',
         'توصيل', 'شحن', 'تشحنون', 'توصلون', 'الرياض', 'جدة', 'جده', 'الدمام', 'مكة', 'مكه',
@@ -237,6 +289,17 @@ function getChatAndStopWords(): array {
     ];
 
     return array_values(array_unique(array_map('normalizeArabicSpelling', $rawWords)));
+}
+
+/**
+ * فحص ما إذا كان العميل يؤكد اقتراح "هل تقصد؟" (مثل: نعم، ايوه، صح، الاول، هو)
+ */
+function isAffirmativeConfirmationMessage(string $messageText): bool {
+    $norm = normalizeArabicSpelling($messageText);
+    $yesWords = [
+        'نعم', 'اي', 'ايه', 'ايوه', 'يب', 'يس', 'صح', 'صحيح', 'تمام', 'اوك', 'اوكي', 'تم', 'هو', 'هذا', 'هذي', 'الاول', '1', 'مضبوط', 'بالضبط', 'نعم هو'
+    ];
+    return in_array($norm, array_map('normalizeArabicSpelling', $yesWords), true);
 }
 
 /**
@@ -257,7 +320,7 @@ function isSessionCancelMessage(string $messageText): bool {
 }
 
 /**
- * قاموس الجمع والمفرد والمرادفات الإملائية الشائعة لقطع الغيار (يدعم القاموس التلقائي)
+ * قاموس الجمع والمفرد والمرادفات الإملائية الشائعة لقطع الغيار
  */
 function getWordVariantsForSearch(string $word): array {
     $norm = normalizeArabicSpelling($word);
@@ -294,11 +357,13 @@ function getWordVariantsForSearch(string $word): array {
         ['فلنجه', 'فلنجات', 'بيرنق', 'رمان'],
         ['مرايه', 'مرايا', 'مرايات'],
         ['نسافه', 'نسافات'],
-        ['بطانه', 'بطانات', 'صاجه', 'صاجات'],
+        ['بطانه', 'بطانات'],
+        ['صاجه', 'صاجات'],
         ['كارتير', 'كرتير'],
         ['ثلاجه', 'ثلاجات'],
         ['بخاخ', 'بخاخات'],
         ['حساس', 'حساسات'],
+        ['هواء', 'هوا'],
     ];
 
     foreach ($synonymGroups as $group) {
@@ -312,39 +377,16 @@ function getWordVariantsForSearch(string $word): array {
 }
 
 /**
- * القاموس القياسي الشامل لأسماء قطع غيار السيارات لضمان تعرف البوت عليها دائماً
- * حتى لو لم تكن مضافة بعد في جدول item_keywords
- */
-function getStandardAutoPartLexicon(): array {
-    $words = [
-        'صدام', 'صدامات', 'صدامه', 'صاجه', 'صاجات', 'بطانه', 'بطانات', 'رفرف', 'رفارف',
-        'كبوت', 'شنطه', 'باب', 'ابواب', 'شبك', 'شمعه', 'شمعات', 'نور', 'انوار', 'فانوس',
-        'اسطب', 'اصطب', 'اسطبات', 'اصطبات', 'سطب', 'كشاف', 'كشافات', 'مرايه', 'مرايا', 'مرايات',
-        'زجاج', 'قزاز', 'مساحه', 'مساحات', 'نسافه', 'نسافات', 'جسر', 'جسور', 'قاعده', 'قواعد',
-        'كلبس', 'كلبسات', 'فيبر', 'حشوه', 'سمكه', 'عتبه', 'هوايه', 'مفصل', 'مفصلات', 'قفل', 'كيلون', 'مقبض', 'يد',
-        'مساعد', 'مساعدات', 'جانبين', 'جمبين', 'مقص', 'مقصات', 'ذراع', 'اذرعه', 'اذرعة', 'جوزه', 'جوزات',
-        'مسمار', 'مسامير', 'توازن', 'عمود', 'عكس', 'عكوس', 'فلنجه', 'فلنجات', 'بيرنق', 'رمان', 'كفر', 'جنط', 'جنوط',
-        'فحمات', 'فحمه', 'قماشات', 'قماش', 'تيل', 'هوب', 'هوبات', 'كليبر', 'باكم', 'جلنط', 'سلك',
-        'رديتر', 'لديتر', 'اديتر', 'راديتر', 'رديترات', 'قربه', 'غطاء', 'مروحه', 'مراوح', 'دينمو', 'دينامو',
-        'كمبروسر', 'كمبرسر', 'كومبرسر', 'كمبريسور', 'ثلاجه', 'ثلاجات', 'فريون', 'لي', 'ليات', 'خرطوش', 'خراطيش',
-        'طرمبه', 'طرمبة', 'طرنبه', 'طرمبات', 'صفايه', 'صفاية', 'فلتر', 'فلاتر', 'بوجي', 'بواجي', 'كويل', 'كويلات',
-        'بخاخ', 'بخاخات', 'حساس', 'حساسات', 'سلف', 'مارش', 'بطاريه', 'ضفيره', 'كمبيوتر', 'فيوز', 'كتاوت',
-        'مكينه', 'ماكينه', 'محرك', 'قير', 'جير', 'دفرنس', 'دبل', 'كرونه', 'كارتير', 'كرتير', 'وجه', 'وجيه', 'صوفه', 'صوف',
-        'جنزير', 'شداد', 'سير', 'سيور', 'بكره', 'بكرات', 'ثروتل', 'بوابه', 'شكمان', 'دبه', 'تيربو',
-        'كرسي', 'كراسي', 'دركسون', 'طاره', 'دوده', 'طبلون', 'عداد', 'فرشه', 'ديكور', 'شاشه', 'ارباق', 'ايرباق', 'حزام'
-    ];
-    return array_values(array_unique(array_map('normalizeArabicSpelling', $words)));
-}
-
-/**
- * قائمة الكلمات الفرعية/الملحقة بقطع الغيار (بحيث لا يخلط البوت بين الصدام نفسه وبين صاجة الصدام أو قاعدة الصدام)
+ * قائمة الكلمات الفرعية/الملحقة بقطع الغيار
+ * (بحيث إذا طلب العميل "صدام امامي" أو "فحمات امامي" لا يظهر له "صاجة صدام امامي" أو "قاعدة صدام" أو "حساس فحمات")
  */
 function getSubComponentPartWords(): array {
     $subWords = [
         'صاجه', 'صاجات', 'بطانه', 'بطانات', 'قاعده', 'قواعد', 'جسر', 'جسور',
         'كلبس', 'كلبسات', 'برواز', 'اطار', 'غطاء', 'اغطيه', 'حشوه', 'فوم',
-        'زجاجه', 'عدسه', 'ظفيره', 'فيش', 'سلك', 'جلده', 'جلد', 'ربله', 'ربلات',
-        'مسطره', 'نيكل', 'زيج', 'لحيه', 'دقن', 'شبك', 'فتحه', 'كرسي', 'مفصل'
+        'زجاجه', 'عدسه', 'ظفيره', 'ضفيره', 'فيش', 'سلك', 'جلده', 'جلد', 'ربله', 'ربلات',
+        'مسطره', 'نيكل', 'زيج', 'لحيه', 'دقن', 'شبك', 'فتحه', 'كرسي', 'مفصل', 'مفصلات',
+        'حساس', 'حساسات', 'مسمار', 'مسامير', 'ورده', 'صاموله', 'شنبر'
     ];
     return array_values(array_unique(array_map('normalizeArabicSpelling', $subWords)));
 }
@@ -393,30 +435,46 @@ function isYearMatchingItem(string $queryYear, ?string $itemYears, string $itemN
 }
 
 /**
- * تنظيف الكلمات المفتاحية من أسماء السيارات وسنوات الصنع وكلمات التوقف
+ * تنظيف الكلمات المفتاحية من أسماء السيارات وسنوات الصنع وكلمات التوقف (مع حماية كلمات القطع مثل زيت وهواء)
  */
 function purgeCarAndYearKeywords(): void {
-    $carsList    = DB::table('cars')->get();
-    $aliasesList = DB::table('car_aliases')->pluck('alias')->toArray();
-    $patterns    = DB::table('year_patterns')->pluck('pattern_example')->toArray();
+    $carsList       = DB::table('cars')->get();
+    $aliasesList    = DB::table('car_aliases')->pluck('alias')->toArray();
+    $patterns       = DB::table('year_patterns')->pluck('pattern_example')->toArray();
+    $protectedWords = getProtectedPartWords();
 
     $forbiddenWords = getChatAndStopWords();
     foreach ($carsList as $c) {
         $forbiddenWords[] = normalizeArabicSpelling($c->car_name);
         foreach (preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $c->car_name, -1, PREG_SPLIT_NO_EMPTY) as $cw) {
-            $forbiddenWords[] = normalizeArabicSpelling($cw);
+            $ forbiddenNorm = normalizeArabicSpelling($cw);
+            if (!in_array($forbiddenNorm, $protectedWords, true)) {
+                $forbiddenWords[] = $forbiddenNorm;
+            }
         }
         if (!empty($c->category)) {
-            $forbiddenWords[] = normalizeArabicSpelling($c->category);
+            $catNorm = normalizeArabicSpelling($c->category);
+            if (!in_array($catNorm, $protectedWords, true)) {
+                $forbiddenWords[] = $catNorm;
+            }
             foreach (preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $c->category, -1, PREG_SPLIT_NO_EMPTY) as $catW) {
-                $forbiddenWords[] = normalizeArabicSpelling($catW);
+                $catWNorm = normalizeArabicSpelling($catW);
+                if (!in_array($catWNorm, $protectedWords, true)) {
+                    $forbiddenWords[] = $catWNorm;
+                }
             }
         }
     }
     foreach ($aliasesList as $a) {
-        $forbiddenWords[] = normalizeArabicSpelling($a);
+        $aNorm = normalizeArabicSpelling($a);
+        if (!in_array($aNorm, $protectedWords, true)) {
+            $forbiddenWords[] = $aNorm;
+        }
         foreach (preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $a, -1, PREG_SPLIT_NO_EMPTY) as $aw) {
-            $forbiddenWords[] = normalizeArabicSpelling($aw);
+            $awNorm = normalizeArabicSpelling($aw);
+            if (!in_array($awNorm, $protectedWords, true)) {
+                $forbiddenWords[] = $awNorm;
+            }
         }
     }
     foreach ($patterns as $p) {
@@ -426,7 +484,8 @@ function purgeCarAndYearKeywords(): void {
         }
     }
 
-    $forbiddenWords = array_values(array_unique(array_filter($forbiddenWords)));
+    // ضمان عدم حذف أي كلمة محمية (مثل زيت، هواء، مكيف، فحمات، صدام) من جدول الكلمات المفتاحية أبداً
+    $forbiddenWords = array_values(array_diff(array_unique(array_filter($forbiddenWords)), $protectedWords));
 
     $allKeywords = DB::table('item_keywords')->get();
     $seenPerItem = [];
@@ -456,9 +515,10 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
 
     if ($cleanNumber === '' || $cleanName === '') return;
 
-    $detectedCarsList  = [];
+    $detectedCarsList   = [];
     $detectedCategories = [];
-    $detectedYearsList = [];
+    $detectedYearsList  = [];
+    $protectedWords     = getProtectedPartWords();
 
     $carsList    = DB::table('cars')->get();
     $allCarWords = [];
@@ -469,7 +529,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
             $allCarWords[] = $car->category;
             $allCarWords = array_merge($allCarWords, preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $car->category, -1, PREG_SPLIT_NO_EMPTY));
         }
-        if (mb_stripos($cleanName, $car->car_name) !== false) {
+        if (containsWholeWordArabicSafe($cleanName, $car->car_name)) {
             $detectedCarsList[]   = $car->car_name;
             $detectedCategories[] = $car->category;
         }
@@ -477,7 +537,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
         foreach ($aliases as $alias) {
             if ($alias !== '') {
                 $allCarWords = array_merge($allCarWords, preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $alias, -1, PREG_SPLIT_NO_EMPTY));
-                if (mb_stripos($cleanName, $alias) !== false) {
+                if (containsWholeWordArabicSafe($cleanName, $alias)) {
                     $detectedCarsList[]   = $car->car_name;
                     $detectedCategories[] = $car->category;
                 }
@@ -495,7 +555,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
         if ($normP !== '') {
             $allYearWords[] = $normP;
             $allYearWords = array_merge($allYearWords, preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $normP, -1, PREG_SPLIT_NO_EMPTY));
-            if (mb_stripos($cleanName, $normP) !== false) {
+            if (containsWholeWordArabicSafe($cleanName, $normP)) {
                 $detectedYearsList[] = $normP;
             }
         }
@@ -503,20 +563,20 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
 
     $nameForKeywords = $cleanName;
     foreach ($carsList as $car) {
-        $nameForKeywords = str_ireplace($car->car_name, ' ', $nameForKeywords);
-        if (!empty($car->category)) {
-            $nameForKeywords = str_ireplace($car->category, ' ', $nameForKeywords);
+        $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $car->car_name);
+        if (!empty($car->category) && !in_array(normalizeArabicSpelling($car->category), $protectedWords, true)) {
+            $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $car->category);
         }
     }
     $allAliases = DB::table('car_aliases')->pluck('alias')->toArray();
     foreach ($allAliases as $al) {
-        if ($al !== '') {
-            $nameForKeywords = str_ireplace($al, ' ', $nameForKeywords);
+        if ($al !== '' && !in_array(normalizeArabicSpelling($al), $protectedWords, true)) {
+            $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $al);
         }
     }
     foreach ($patterns as $pattern) {
         if ($pattern !== '') {
-            $nameForKeywords = str_ireplace(normalizeArabicDigits($pattern), ' ', $nameForKeywords);
+            $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, normalizeArabicDigits($pattern));
         }
     }
 
@@ -605,7 +665,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
             DB::table('master_items')->where('item_number', $cleanNumber)->update([
                 'compatible_cars'  => $mergedCars ?: null,
                 'compatible_years' => $mergedYears ?: null,
-                'updated_at'       => now(),
+                'updated_at'       => $now = now(),
             ]);
         }
     }
@@ -624,7 +684,10 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
         $skipWords[] = $dy;
         $skipWords = array_merge($skipWords, preg_split('/[\s,\-\/]+/u', $dy));
     }
-    $skipWords = array_values(array_unique(array_map('normalizeArabicSpelling', array_filter($skipWords))));
+    $skipWords = array_values(array_diff(
+        array_unique(array_map('normalizeArabicSpelling', array_filter($skipWords))),
+        $protectedWords
+    ));
 
     $existingKeywordsNorm = DB::table('item_keywords')
         ->where('item_number', $cleanNumber)
@@ -685,7 +748,6 @@ function cleanupAndNormalizeInventoryData(): void {
 
         $key = $item->user_id . '::' . $normNum;
         if (isset($seenUserItems[$key])) {
-            // إذا كان هناك سجل مكرر لنفس العميل ونفس رقم الصنف، نحتفظ بالأحدث فقط ونحذف القديم لمنع تضاعف الكميات
             DB::table('items')->where('id', $item->id)->delete();
             continue;
         }
@@ -706,11 +768,7 @@ function cleanupAndNormalizeInventoryData(): void {
 }
 
 /**
- * مزامنة جميع الأصناف الحالية مع قلب النظام بكفاءة
- */
-/**
- * [إضافة 1]: التعرف الذكي التلقائي على أعمدة ملف الإكسل (Smart Column Mapping)
- * يدعم مختلف التسميات العربية والإنجليزية الشائعة لدى تجار قطع الغيار
+ * التعرف الذكي التلقائي على أعمدة ملف الإكسل (Smart Column Mapping)
  */
 function detectSmartExcelColumns(array $headerRow): array {
     $mapping = [
@@ -763,7 +821,6 @@ function detectSmartExcelColumns(array $headerRow): array {
         }
     }
 
-    // في حال كان الملف بدون ترويسة واضحة، نعتمد الترتيب الافتراضي القياسي (0: رقم الصنف، 1: اسم الصنف، 2: الكمية، 3: السعر)
     $keys = array_keys($headerRow);
     if ($mapping['item_number'] === null && isset($keys[0])) $mapping['item_number'] = $keys[0];
     if ($mapping['item_name'] === null && isset($keys[1]))   $mapping['item_name']   = $keys[1];
@@ -788,10 +845,9 @@ function extractRowMappedValue(array $row, $mappedKey, string $fieldName, int $f
 }
 
 /**
- * [إضافة 5]: إنشاء نقطة استرجاع فورية (One-Click Rollback Snapshot) قبل بدء الاستيراد
+ * إنشاء نقطة استرجاع فورية (One-Click Rollback Snapshot) قبل بدء الاستيراد
  */
 function createInventoryRollbackSnapshot(int $userId, ?string $label = null): int {
-    // الاحتفاظ بآخر 5 نسخ استرجاع فقط لكل مستخدم لتوفير المساحة
     $oldSnapshots = DB::table('inventory_snapshots')
         ->where('user_id', $userId)
         ->orderByDesc('id')
@@ -821,7 +877,7 @@ function createInventoryRollbackSnapshot(int $userId, ?string $label = null): in
 }
 
 /**
- * [إضافة 5]: استعادة نقطة الاسترجاع الفورية بضغطة زر (One-Click Rollback Restore)
+ * استعادة نقطة الاسترجاع الفورية بضغطة زر (One-Click Rollback Restore)
  */
 function restoreInventoryRollbackSnapshot(int $userId, ?int $snapshotId = null): array {
     $query = DB::table('inventory_snapshots')->where('user_id', $userId);
@@ -898,9 +954,10 @@ function buildMasterDictionaryRamCache(): array {
         ->values()
         ->toArray();
 
-    $allCarWords  = [];
-    $allAliases   = [];
-    $carMapById   = [];
+    $protectedWords = getProtectedPartWords();
+    $allCarWords    = [];
+    $allAliases     = [];
+    $carMapById     = [];
 
     foreach ($cars as $car) {
         $carMapById[$car->id] = $car;
@@ -926,20 +983,23 @@ function buildMasterDictionaryRamCache(): array {
         $allYearWords = array_merge($allYearWords, preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $normP, -1, PREG_SPLIT_NO_EMPTY));
     }
 
-    $baseSkipWords = array_values(array_unique(array_map('normalizeArabicSpelling', array_filter(array_merge($allCarWords, $allYearWords, getChatAndStopWords())))));
+    $baseSkipWords = array_values(array_diff(
+        array_unique(array_map('normalizeArabicSpelling', array_filter(array_merge($allCarWords, $allYearWords, getChatAndStopWords())))),
+        $protectedWords
+    ));
 
     return [
-        'cars'           => $cars,
-        'all_aliases'    => $allAliases,
-        'patterns'       => $patterns,
-        'base_skip_words'=> $baseSkipWords,
-        'has_compat_col' => Schema::hasColumn('master_items', 'compatible_cars'),
+        'cars'            => $cars,
+        'all_aliases'     => $allAliases,
+        'patterns'        => $patterns,
+        'base_skip_words' => $baseSkipWords,
+        'protected_words' => $protectedWords,
+        'has_compat_col'  => Schema::hasColumn('master_items', 'compatible_cars'),
     ];
 }
 
 /**
  * تحليل دفعة كاملة من الأصناف وحفظها وإرسالها لقلب النظام في الذاكرة (Bulk Upsert & Sync)
- * تعالج مئات الأصناف في أجزاء من الثانية دون إغراق قاعدة البيانات بالاستعلامات المتكررة
  */
 function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCache = null, ?array $columnMapping = null): array {
     if (empty($rows)) {
@@ -950,7 +1010,6 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
         $ramCache = buildMasterDictionaryRamCache();
     }
 
-    // إذا لم يتم تمرير ربط الأعمدة، نكتشفه تلقائياً من أول سطر
     if ($columnMapping === null) {
         $firstRow = reset($rows);
         if (is_array($firstRow)) {
@@ -970,7 +1029,6 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
         $itemNumber = strtoupper(trim((string) $rawNum));
         $itemName   = normalizeArabicDigits(trim((string) $rawName));
 
-        // تخطي صف الرأس (Header Row) إن وجد ضمن البيانات
         if ($itemNumber === '' || $itemName === '' || in_array(strtolower($itemNumber), ['item_number', 'part_number', 'code', 'رقم الصنف', 'كود الصنف'], true)) {
             continue;
         }
@@ -992,18 +1050,18 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
 
     $batchNumbers = array_keys($normalizedBatch);
 
-    // جلب الأصناف الموجودة مسبقاً لدى المستخدم في استعلام واحد فقط
     $existingItems = DB::table('items')
         ->where('user_id', $userId)
         ->whereIn('item_number', $batchNumbers)
         ->pluck('id', 'item_number')
         ->toArray();
 
-    $now           = now();
-    $toInsertItems = [];
-    $toUpdateItems = [];
-    $keywordsBatch = [];
-    $masterUpdates = [];
+    $now            = now();
+    $toInsertItems  = [];
+    $toUpdateItems  = [];
+    $keywordsBatch  = [];
+    $masterUpdates  = [];
+    $protectedWords = $ramCache['protected_words'] ?? getProtectedPartWords();
 
     foreach ($normalizedBatch as $itemNumber => $data) {
         $cleanName          = $data['item_name'];
@@ -1012,13 +1070,13 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
         $detectedYearsList  = [];
 
         foreach ($ramCache['cars'] as $car) {
-            if (mb_stripos($cleanName, $car->car_name) !== false) {
+            if (containsWholeWordArabicSafe($cleanName, $car->car_name)) {
                 $detectedCarsList[]   = $car->car_name;
                 $detectedCategories[] = $car->category;
             }
         }
         foreach ($ramCache['all_aliases'] as $alData) {
-            if (mb_stripos($cleanName, $alData['alias']) !== false) {
+            if (containsWholeWordArabicSafe($cleanName, $alData['alias'])) {
                 $detectedCarsList[]   = $alData['car_name'];
                 $detectedCategories[] = $alData['category'];
             }
@@ -1028,23 +1086,25 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
         $detectedCategories = array_values(array_unique(array_filter($detectedCategories)));
 
         foreach ($ramCache['patterns'] as $normP) {
-            if (mb_stripos($cleanName, $normP) !== false) {
+            if (containsWholeWordArabicSafe($cleanName, $normP)) {
                 $detectedYearsList[] = $normP;
             }
         }
 
         $nameForKeywords = $cleanName;
         foreach ($ramCache['cars'] as $car) {
-            $nameForKeywords = str_ireplace($car->car_name, ' ', $nameForKeywords);
-            if (!empty($car->category)) {
-                $nameForKeywords = str_ireplace($car->category, ' ', $nameForKeywords);
+            $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $car->car_name);
+            if (!empty($car->category) && !in_array(normalizeArabicSpelling($car->category), $protectedWords, true)) {
+                $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $car->category);
             }
         }
         foreach ($ramCache['all_aliases'] as $alData) {
-            $nameForKeywords = str_ireplace($alData['alias'], ' ', $nameForKeywords);
+            if (!in_array(normalizeArabicSpelling($alData['alias']), $protectedWords, true)) {
+                $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $alData['alias']);
+            }
         }
         foreach ($ramCache['patterns'] as $normP) {
-            $nameForKeywords = str_ireplace($normP, ' ', $nameForKeywords);
+            $nameForKeywords = replaceWholeWordArabicSafe($nameForKeywords, $normP);
         }
 
         if (preg_match_all('/(?:(?:19|20)?\d{2})\s*[\/-]\s*(?:(?:19|20)?\d{2})/u', $cleanName, $mRanges)) {
@@ -1053,7 +1113,7 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
             }
         }
         if (empty($detectedYearsList)) {
-            if (preg_match_all('/ (?:19\d{2}|20\d{2}) /u', $cleanName, $mFullYears)) {
+            if (preg_match_all('/\b(?:19\d{2}|20\d{2})\b/u', $cleanName, $mFullYears)) {
                 foreach ($mFullYears[0] as $fy) {
                     $detectedYearsList[] = $fy;
                 }
@@ -1067,7 +1127,7 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
         $detectedYearsList = array_values(array_unique(array_filter($detectedYearsList)));
 
         $nameForKeywords = preg_replace('/(?:(?:19|20)?\d{2})\s*[\/-]\s*(?:(?:19|20)?\d{2})/u', ' ', $nameForKeywords);
-        $nameForKeywords = preg_replace('/ (?:19|20)\d{2} /u', ' ', $nameForKeywords);
+        $nameForKeywords = preg_replace('/\b(?:19|20)\d{2}\b/u', ' ', $nameForKeywords);
         $nameForKeywords = preg_replace('/(?<!\d)\d{2}(?!\d)/u', ' ', $nameForKeywords);
 
         $itemCarString      = !empty($detectedCarsList) ? implode(' | ', $detectedCarsList) : null;
@@ -1133,7 +1193,6 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
             DB::table('items')->where('id', $rowId)->update($updRow);
         }
 
-        // تحديث قلب النظام (master_items) دفعة واحدة
         $existingMasters = DB::table('master_items')
             ->whereIn('item_number', $batchNumbers)
             ->get()
@@ -1159,8 +1218,8 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
                 $masterInsertRows[] = $mRow;
             } elseif ($ramCache['has_compat_col']) {
                 $exMaster  = $existingMasters[$itemNum];
-                $prevCars  = !empty($exMaster->compatible_cars) ? array_map('trim', explode('|', $exMaster->compatible_cars)) : [];
-                $prevYears = !empty($exMaster->compatible_years) ? array_map('trim', explode('|', $exMaster->compatible_years)) : [];
+                $prevCars  = !empty($exMaster->compatible_cars) ? array_map('trim', explode('|', $existingMasters[$itemNum]->compatible_cars)) : [];
+                $prevYears = !empty($exMaster->compatible_years) ? array_map('trim', explode('|', $existingMasters[$itemNum]->compatible_years)) : [];
 
                 $mergedCars  = implode(' | ', array_values(array_unique(array_filter(array_merge($prevCars, $mInfo['cars'])))));
                 $mergedYears = implode(' | ', array_values(array_unique(array_filter(array_merge($prevYears, $mInfo['years'])))));
@@ -1199,7 +1258,7 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
 }
 
 /**
- * قراءة ملف الإكسل أو CSV وتحويله إلى مصفوفة أسطر بسرعة عالية (يدعم Maatwebsite Excel و PhpSpreadsheet و SimpleXLSX و CSV)
+ * قراءة ملف الإكسل أو CSV وتحويله إلى مصفوفة أسطر بسرعة عالية
  */
 function parseUploadedSpreadsheetFileRows(string $filePath): array {
     if (!file_exists($filePath)) {
@@ -1331,7 +1390,7 @@ function syncAllExistingItemsToCore(): void {
 
 /*
 |--------------------------------------------------------------------------
-| 4. محرك تحليل رسائل الواتساب والبحث الذكي في المخزون والقاموس المشترك
+| 4. محرك تحليل رسائل الواتساب والبحث الذكي بالمصادر الثلاثة ونظام النسب المئوية
 |--------------------------------------------------------------------------
 */
 
@@ -1402,25 +1461,95 @@ function expandCompoundDirectionalRequests(array $rawParts): array {
 }
 
 /**
- * البحث الدقيق عن قطعة واحدة في مخزون العميل بالاعتماد على:
- * 1) اسم الصنف لدى العميل
- * 2) قاموس المرادفات المشترك (item_keywords) المجمع من كل العملاء لنفس الرقم الموحد
- * 3) توافق السيارات والموديلات المسجل لنفس الرقم في (master_items)
+ * استرجاع الكلمات المفتاحية المرتبطة حصرياً بأصناف التاجر في مخزونه الخاص (المصدر الأول الوحيد لترجمة القطع)
  */
-function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, string $year, int $ownerUserId) {
-    $singlePartRequest = trim($singlePartRequest);
-    if ($singlePartRequest === '') {
-        return collect();
+function getTenantInventoryKeywordsMap(int $ownerUserId): array {
+    $tenantItems = DB::table('items')
+        ->where('user_id', $ownerUserId)
+        ->select('item_number', 'item_name')
+        ->get();
+
+    if ($tenantItems->isEmpty()) {
+        return ['by_number' => [], 'all_words' => []];
     }
 
-    // فحص التطابق المباشر برقم الصنف
+    $itemNumbers = $tenantItems->pluck('item_number')
+        ->map(fn($n) => strtoupper(trim((string) $n)))
+        ->filter()
+        ->unique()
+        ->values()
+        ->toArray();
+
+    $byNumber = [];
+    $allWords = [];
+
+    if (!empty($itemNumbers)) {
+        $rawKws = DB::table('item_keywords')
+            ->whereIn('item_number', $itemNumbers)
+            ->get();
+
+        foreach ($rawKws as $rk) {
+            $num  = strtoupper(trim((string) $rk->item_number));
+            $norm = normalizeArabicSpelling($rk->keyword);
+            if ($norm !== '' && mb_strlen($norm) >= 2) {
+                $byNumber[$num][] = $norm;
+                $allWords[]       = $norm;
+            }
+        }
+    }
+
+    // في حال وجود صنف لدى التاجر لم يتم استخراج كلماته المفتاحية بعد، نستخرجها من اسم الصنف الخاص به فقط
+    $stopWords = getChatAndStopWords();
+    foreach ($tenantItems as $tItem) {
+        $num = strtoupper(trim((string) $tItem->item_number));
+        if (empty($byNumber[$num])) {
+            $tokens = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', normalizeArabicSpelling($tItem->item_name), -1, PREG_SPLIT_NO_EMPTY);
+            foreach ($tokens as $tk) {
+                if (mb_strlen($tk) >= 2 && !is_numeric($tk) && !in_array($tk, $stopWords, true)) {
+                    $byNumber[$num][] = $tk;
+                    $allWords[]       = $tk;
+                }
+            }
+        }
+    }
+
+    foreach ($byNumber as $num => $list) {
+        $byNumber[$num] = array_values(array_unique($list));
+    }
+
+    return [
+        'by_number' => $byNumber,
+        'all_words' => array_values(array_unique($allWords)),
+    ];
+}
+
+/**
+ * محرك التقييم الذكي وحساب نسبة التطابق المئوية (Confidence Score 0% - 100%)
+ * يعتمد حصرياً على:
+ * 1) الكلمات المفتاحية المرتبطة بأصناف التاجر في مخزونه الخاص
+ * 2) اسم السيارة من الإعدادات
+ * 3) تاريخ الصنع من الإعدادات
+ * ويمنع تماماً خلط (فلتر زيت) بـ (فلتر هواء) أو خلط (صدام امامي) بـ (صاجة صدام امامي)
+ */
+function evaluateSinglePartWithConfidence(string $singlePartRequest, string $car, string $year, int $ownerUserId): array {
+    $singlePartRequest = trim($singlePartRequest);
+    if ($singlePartRequest === '') {
+        return ['best_confidence' => 0, 'exact_items' => collect(), 'suggested_items' => collect()];
+    }
+
+    // 1. تطابق مباشر 100% برقم الصنف في مخزون التاجر
     $directMatch = Item::where('user_id', $ownerUserId)
         ->where('quantity', '>', 0)
         ->where('item_number', strtoupper($singlePartRequest))
         ->first();
 
     if ($directMatch) {
-        return collect([$directMatch]);
+        $directMatch->confidence_score = 100;
+        return [
+            'best_confidence' => 100,
+            'exact_items'     => collect([$directMatch]),
+            'suggested_items' => collect(),
+        ];
     }
 
     $allWords = array_values(array_filter(preg_split('/\s+/u', $singlePartRequest), function ($w) {
@@ -1430,10 +1559,12 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
     $modifiersList    = getPartModifierWords();
     $stopWordsList    = getChatAndStopWords();
     $subComponentsSet = getSubComponentPartWords();
+    $exclusiveGroups  = getMutuallyExclusivePartSpecifiers();
 
     $coreNounWords          = [];
     $directionWords         = [];
     $requestedSubComponents = [];
+    $requestedExclusives    = [];
 
     foreach ($allWords as $w) {
         $normW = normalizeArabicSpelling($w);
@@ -1441,15 +1572,20 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             continue;
         }
         if (in_array($normW, $modifiersList, true)) {
-            $directionWords[] = $w;
+            $directionWords[] = $normW;
         } else {
-            $coreNounWords[] = $w;
+            $coreNounWords[] = $normW;
             $wVariants = getWordVariantsForSearch($normW);
             foreach ($wVariants as $wv) {
                 $wvNoAl = (mb_strlen($wv) > 4 && str_starts_with($wv, 'ال')) ? mb_substr($wv, 2) : $wv;
                 if (in_array($wv, $subComponentsSet, true) || in_array($wvNoAl, $subComponentsSet, true)) {
                     $requestedSubComponents[] = $wv;
                     $requestedSubComponents[] = $wvNoAl;
+                }
+                foreach ($exclusiveGroups as $groupIdx => $groupWords) {
+                    if (in_array($wv, $groupWords, true) || in_array($wvNoAl, $groupWords, true)) {
+                        $requestedExclusives[$groupIdx] = $groupWords;
+                    }
                 }
             }
         }
@@ -1458,10 +1594,10 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
     $requestedSubComponents = array_values(array_unique($requestedSubComponents));
 
     if (empty($coreNounWords)) {
-        return collect();
+        return ['best_confidence' => 0, 'exact_items' => collect(), 'suggested_items' => collect()];
     }
 
-    // جلب الأرقام الموحدة التي تتوافق مع السيارة المطلوبة في master_items (لدعم القطع المشتركة بين عدة سيارات)
+    // جلب الأرقام الموحدة التي تتوافق مع السيارة المطلوبة في master_items
     $masterCompatibleNumbers = [];
     if ($car !== '' && Schema::hasColumn('master_items', 'compatible_cars')) {
         $masterCompatibleNumbers = DB::table('master_items')
@@ -1470,6 +1606,7 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             ->toArray();
     }
 
+    // جلب أصناف التاجر المتوافقة مع السيارة المطلوبة
     $carCandidates = Item::where('user_id', $ownerUserId)
         ->where('quantity', '>', 0)
         ->when($car !== '', function ($q) use ($car, $masterCompatibleNumbers) {
@@ -1483,20 +1620,15 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
         })
         ->get();
 
-    // تحميل بيانات التوافق والكلمات المفتاحية دفعة واحدة لتسريع البحث
-    $candidateNumbers = $carCandidates->pluck('item_number')->unique()->toArray();
-
-    $keywordsByNumber = [];
-    if (!empty($candidateNumbers)) {
-        $rawKws = DB::table('item_keywords')
-            ->whereIn('item_number', $candidateNumbers)
-            ->get();
-        foreach ($rawKws as $rk) {
-            $keywordsByNumber[$rk->item_number][] = normalizeArabicSpelling($rk->keyword);
-        }
+    if ($carCandidates->isEmpty()) {
+        return ['best_confidence' => 0, 'exact_items' => collect(), 'suggested_items' => collect()];
     }
 
+    $tenantKeywordsMap   = getTenantInventoryKeywordsMap($ownerUserId);
+    $keywordsByNumber    = $tenantKeywordsMap['by_number'];
+    $candidateNumbers    = $carCandidates->pluck('item_number')->unique()->toArray();
     $masterYearsByNumber = [];
+
     if (!empty($candidateNumbers) && Schema::hasColumn('master_items', 'compatible_years')) {
         $masterYearsByNumber = DB::table('master_items')
             ->whereIn('item_number', $candidateNumbers)
@@ -1504,119 +1636,241 @@ function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, 
             ->toArray();
     }
 
-    $matched = $carCandidates->filter(function ($item) use ($coreNounWords, $directionWords, $requestedSubComponents, $subComponentsSet, $year, $keywordsByNumber, $masterYearsByNumber) {
-        $masterCompatYears = $masterYearsByNumber[$item->item_number] ?? null;
+    $scoredItems = [];
 
+    foreach ($carCandidates as $item) {
+        $cleanNum          = strtoupper(trim((string) $item->item_number));
+        $masterCompatYears = $masterYearsByNumber[$cleanNum] ?? null;
+
+        // فلتر تاريخ الصنع الصارم (المصدر الثالث)
         if ($year !== '' && !isYearMatchingItem($year, $item->detected_years, $item->item_name, $masterCompatYears)) {
-            return false;
+            continue;
         }
 
-        $itemNameNorm = normalizeArabicSpelling($item->item_name);
-        $itemKeywords = implode(' ', $keywordsByNumber[$item->item_number] ?? []);
+        // الكلمات المفتاحية الخاصة بهذا الصنف في مخزون التاجر (المصدر الأول)
+        $itemKeywordsList = $keywordsByNumber[$cleanNum] ?? [];
+        $itemNameNorm     = normalizeArabicSpelling($item->item_name);
+        $itemNameTokens   = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $itemNameNorm, -1, PREG_SPLIT_NO_EMPTY);
 
-        // النص الكامل القابل للبحث يشمل اسم الصنف لدى العميل + كل مرادفات القاموس التراكمي لنفس الرقم الموحد
-        $fullSearchableText = $itemNameNorm . ' ' . $itemKeywords;
-        $searchableTokens   = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $fullSearchableText, -1, PREG_SPLIT_NO_EMPTY);
-        $itemNameTokens     = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $itemNameNorm, -1, PREG_SPLIT_NO_EMPTY);
+        // دمج الكلمات المفتاحية للصنف مع كلمات اسمه الفعلي لدى التاجر
+        $searchableTokens = array_values(array_unique(array_merge($itemKeywordsList, $itemNameTokens)));
+        $fullSearchableText = implode(' ', $searchableTokens);
 
-        // التحقق من وجود الكلمات الأساسية للقطعة (مع مرادفاتها وجموعها)
+        // 1. الحماية الصارمة من القطع الفرعية والملحقات (مثل: طلب "صدام امامي" فلا يظهر له "صاجة صدام امامي" أو "قاعدة صدام")
+        if (empty($requestedSubComponents)) {
+            $hasUnrequestedSubComponent = false;
+            foreach ($searchableTokens as $iToken) {
+                $iTokenNoAl = (mb_strlen($iToken) > 4 && str_starts_with($iToken, 'ال')) ? mb_substr($iToken, 2) : $iToken;
+                if (in_array($iToken, $subComponentsSet, true) || in_array($iTokenNoAl, $subComponentsSet, true)) {
+                    $hasUnrequestedSubComponent = true;
+                    break;
+                }
+            }
+            if ($hasUnrequestedSubComponent) {
+                continue;
+            }
+        } else {
+            // إذا طلب العميل صراحةً قطعة فرعية (مثل "صاجة صدام")، يجب أن يحتوي الصنف على الكلمة الفرعية المطلوبة
+            $foundSub = false;
+            foreach ($requestedSubComponents as $reqSub) {
+                foreach ($searchableTokens as $iToken) {
+                    $iTokenNoAl = (mb_strlen($iToken) > 4 && str_starts_with($iToken, 'ال')) ? mb_substr($iToken, 2) : $iToken;
+                    if ($iToken === $reqSub || $iTokenNoAl === $reqSub) {
+                        $foundSub = true;
+                        break 2;
+                    }
+                }
+            }
+            if (!$foundSub) {
+                continue;
+            }
+        }
+
+        // 2. الحماية الصارمة من خلط الأنواع المتضادة (مثل: طلب "فلتر زيت" فلا يظهر له "فلتر هواء" أو "فلتر مكيف" أبداً)
+        if (!empty($requestedExclusives)) {
+            $hasConflict = false;
+            foreach ($requestedExclusives as $reqGroupIdx => $reqGroupWords) {
+                // أولاً: يجب أن يحتوي الصنف على النوع الذي طلبه العميل (مثلاً: زيت)
+                $hasRequestedSpec = false;
+                foreach ($reqGroupWords as $rgw) {
+                    foreach ($searchableTokens as $tk) {
+                        $tkNoAl = (mb_strlen($tk) > 4 && str_starts_with($tk, 'ال')) ? mb_substr($tk, 2) : $tk;
+                        if ($tk === $rgw || $tkNoAl === $rgw) {
+                            $hasRequestedSpec = true;
+                            break 2;
+                        }
+                    }
+                }
+                if (!$hasRequestedSpec) {
+                    $hasConflict = true;
+                    break;
+                }
+
+                // ثانياً: إذا كان الصنف يحتوي على نوع آخر مناقض لم يطلبه العميل (مثلاً: هواء أو مكيف)، نستبعده فوراً
+                foreach ($exclusiveGroups as $otherIdx => $otherWords) {
+                    if ($otherIdx === $reqGroupIdx) continue;
+                    foreach ($otherWords as $ow) {
+                        foreach ($searchableTokens as $tk) {
+                            $tkNoAl = (mb_strlen($tk) > 4 && str_starts_with($tk, 'ال')) ? mb_substr($tk, 2) : $tk;
+                            if ($tk === $ow || $tkNoAl === $ow) {
+                                $hasConflict = true;
+                                break 3;
+                            }
+                        }
+                    }
+                }
+            }
+            if ($hasConflict) {
+                continue;
+            }
+        }
+
+        // 3. حساب نسبة تطابق الكلمات الأساسية للقطعة (Core Nouns Matching)
+        $matchedCoreCount = 0;
+        $totalCoreCount   = count($coreNounWords);
+
         foreach ($coreNounWords as $coreWord) {
             $variants  = getWordVariantsForSearch($coreWord);
             $foundCore = false;
 
             foreach ($variants as $v) {
+                $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
                 foreach ($searchableTokens as $token) {
                     $tokenNoAl = (mb_strlen($token) > 4 && str_starts_with($token, 'ال')) ? mb_substr($token, 2) : $token;
-                    $vNoAl     = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
-
                     if ($token === $v || $tokenNoAl === $vNoAl) {
                         $foundCore = true;
                         break 2;
                     }
-                    if (mb_strlen($vNoAl) >= 4 && (str_contains($tokenNoAl, $vNoAl) || str_contains($vNoAl, $tokenNoAl))) {
-                        $foundCore = true;
-                        break 2;
-                    }
                 }
             }
 
-            if (!$foundCore) {
-                return false;
+            if ($foundCore) {
+                $matchedCoreCount++;
             }
         }
 
-        // منع الخلط بين القطعة الأساسية والقطعة الفرعية:
-        // إذا طلب الزبون "صدام امامي" فقط (ولم يطلب صاجة أو بطانة أو قاعدة أو جسر)، نستبعد الأصناف التي هي عبارة عن "صاجة صدام" أو "قاعدة صدام"
-        if (empty($requestedSubComponents)) {
-            foreach ($itemNameTokens as $iToken) {
-                $iTokenNoAl = (mb_strlen($iToken) > 4 && str_starts_with($iToken, 'ال')) ? mb_substr($iToken, 2) : $iToken;
-                if (in_array($iToken, $subComponentsSet, true) || in_array($iTokenNoAl, $subComponentsSet, true)) {
-                    return false;
-                }
-            }
+        if ($matchedCoreCount === 0) {
+            continue;
         }
 
-        // التحقق الصارم من الاتجاهات (يمين/يسار/أمامي/خلفي)
+        // 4. فحص الاتجاهات (يمين / يسار / أمامي / خلفي)
+        $directionPenalty = 0;
+        $directionContradiction = false;
+
         foreach ($directionWords as $dirWord) {
             $dwNorm = normalizeArabicSpelling($dirWord);
 
-            if ($dwNorm === 'يمين' && mb_stripos($fullSearchableText, 'يمين') === false) {
-                return false;
+            if ($dwNorm === 'يمين' && mb_stripos($fullSearchableText, 'يسار') !== false && mb_stripos($fullSearchableText, 'يمين') === false) {
+                $directionContradiction = true;
+                break;
             }
-            if ($dwNorm === 'يسار' && mb_stripos($fullSearchableText, 'يسار') === false) {
-                return false;
+            if ($dwNorm === 'يسار' && mb_stripos($fullSearchableText, 'يمين') !== false && mb_stripos($fullSearchableText, 'يسار') === false) {
+                $directionContradiction = true;
+                break;
             }
-            if (in_array($dwNorm, ['امامي', 'اماميه'], true) && mb_stripos($fullSearchableText, 'خلفي') !== false && mb_stripos($fullSearchableText, 'امام') === false) {
-                return false;
+            if (in_array($dwNorm, ['امامي', 'اماميه'], true) && mb_stripos($fullSearchableText, 'خلف') !== false && mb_stripos($fullSearchableText, 'امام') === false) {
+                $directionContradiction = true;
+                break;
             }
             if (in_array($dwNorm, ['خلفي', 'خلفيه'], true) && mb_stripos($fullSearchableText, 'امام') !== false && mb_stripos($fullSearchableText, 'خلف') === false) {
-                return false;
+                $directionContradiction = true;
+                break;
             }
 
             $dirRoot = rtrim($dwNorm, 'ه');
             if (mb_stripos($fullSearchableText, $dirRoot) === false && mb_stripos($fullSearchableText, $dwNorm) === false) {
-                return false;
+                // الصنف لا يذكر الاتجاه المطلوب صراحةً -> نخفض النسبة ليدخل في نطاق "هل تقصد؟"
+                $directionPenalty += 25;
             }
         }
 
-        return true;
-    })->sortByDesc(function ($item) use ($singlePartRequest, $coreNounWords) {
-        // ترتيب النتائج بالأولوية للأصناف المطابقة تماماً لعبارة العميل في اسم الصنف نفسه
-        $itemNameNorm = normalizeArabicSpelling($item->item_name);
-        $reqNorm      = normalizeArabicSpelling($singlePartRequest);
-        $score        = 0;
-
-        if (mb_stripos($itemNameNorm, $reqNorm) !== false) {
-            $score += 100;
+        if ($directionContradiction) {
+            continue;
         }
 
-        $directNounHits = 0;
-        foreach ($coreNounWords as $cw) {
-            foreach (getWordVariantsForSearch($cw) as $v) {
-                if (mb_stripos($itemNameNorm, $v) !== false) {
-                    $directNounHits++;
+        // 5. احتساب النسبة المئوية للذكاء (Confidence Score 0% - 100%)
+        $coreRatioScore = ($matchedCoreCount / $totalCoreCount) * 100;
+
+        // إذا كان الصنف في المخزون يحتوي على كلمات تخصصية إضافية لم يحددها العميل (مثل: العميل كتب "فلتر" فقط، والصنف "فلتر هواء" أو "فلتر زيت")
+        // نخفض النسبة إلى 60% لكي يسأله البوت: "هل تقصد فلتر زيت / فلتر هواء؟" بدلاً من الإجابة العشوائية!
+        $unrequestedSpecPenalty = 0;
+        if (empty($requestedExclusives)) {
+            foreach ($exclusiveGroups as $exGroup) {
+                foreach ($exGroup as $exWord) {
+                    if (in_array($exWord, $searchableTokens, true)) {
+                        $unrequestedSpecPenalty = 35;
+                        break 2;
+                    }
+                }
+            }
+        }
+
+        // إذا كان الصنف يحدد اتجاهاً (امامي/خلفي/يمين/يسار) والعميل لم يحدد الاتجاه في طلبه، نخفض النسبة قليلاً
+        $unspecifiedDirPenalty = 0;
+        if (empty($directionWords)) {
+            foreach (['يمين', 'يسار', 'امامي', 'خلفي'] as $dCheck) {
+                if (mb_stripos($fullSearchableText, $dCheck) !== false) {
+                    $unspecifiedDirPenalty = 15;
                     break;
                 }
             }
         }
-        $score += ($directNounHits * 25);
 
-        // تفضيل الاسم الأقصر والأدق عند تساوي التطابق
-        $score -= mb_strlen($itemNameNorm) * 0.1;
+        $finalConfidence = (int) round($coreRatioScore - $directionPenalty - $unrequestedSpecPenalty - $unspecifiedDirPenalty);
+        $finalConfidence = max(10, min(100, $finalConfidence));
 
-        return $score;
-    })->take(3)->values();
+        // إذا طابق كل الكلمات المطلوبة بدون أي نقص أو تعارض، نرفعه إلى 100%
+        if ($matchedCoreCount === $totalCoreCount && $directionPenalty === 0 && $unrequestedSpecPenalty === 0 && $unspecifiedDirPenalty === 0) {
+            $finalConfidence = 100;
+        }
 
-    return $matched;
+        $itemClone = clone $item;
+        $itemClone->confidence_score = $finalConfidence;
+        $scoredItems[] = $itemClone;
+    }
+
+    if (empty($scoredItems)) {
+        return ['best_confidence' => 0, 'exact_items' => collect(), 'suggested_items' => collect()];
+    }
+
+    usort($scoredItems, function ($a, $b) use ($singlePartRequest) {
+        if ($b->confidence_score !== $a->confidence_score) {
+            return $b->confidence_score <=> $a->confidence_score;
+        }
+        $reqNorm = normalizeArabicSpelling($singlePartRequest);
+        $aDirect = mb_stripos(normalizeArabicSpelling($a->item_name), $reqNorm) !== false ? 1 : 0;
+        $bDirect = mb_stripos(normalizeArabicSpelling($b->item_name), $reqNorm) !== false ? 1 : 0;
+        if ($bDirect !== $aDirect) {
+            return $bDirect <=> $aDirect;
+        }
+        return mb_strlen($a->item_name) <=> mb_strlen($b->item_name);
+    });
+
+    $bestConfidence = $scoredItems[0]->confidence_score;
+
+    return [
+        'best_confidence' => $bestConfidence,
+        'all_scored'      => collect($scoredItems)->take(3)->values(),
+    ];
 }
 
 /**
- * تحليل رسالة الزبون واستخراج أرقام القطع والسيارة والسنة والأصناف المطلوبة بدقة
+ * دالة التوافق مع البحث المباشر (ترجع الأصناف المطابقة)
+ */
+function findMatchingItemsForSinglePart(string $singlePartRequest, string $car, string $year, int $ownerUserId, int $minThreshold = 80) {
+    $eval = evaluateSinglePartWithConfidence($singlePartRequest, $car, $year, $ownerUserId);
+    if (empty($eval['all_scored'])) {
+        return collect();
+    }
+    return $eval['all_scored']->filter(fn($i) => $i->confidence_score >= $minThreshold)->values();
+}
+
+/**
+ * استبدال الكلمات الكاملة فقط بأمان دون المساس بحروف الكلمات الأخرى
  */
 function replaceWholeWordArabicSafe(string $subject, string $search): string {
     $search = trim($search);
     if ($search === '') return $subject;
-    // استبدال الكلمة فقط إذا كانت محاطة بحدود كلمات أو مسافات لمنع قص حروف من كلمات مثل (صدام / صاجة)
     $pattern = '/(?<=^|[\s,،\-\+\/\(\)\*\.])' . preg_quote($search, '/') . '(?=$|[\s,،\-\+\/\(\)\*\.])/iu';
     return preg_replace($pattern, ' ', $subject);
 }
@@ -1628,19 +1882,25 @@ function containsWholeWordArabicSafe(string $subject, string $search): bool {
     if (preg_match($pattern, $subject)) {
         return true;
     }
-    // فحص إضافي بعد توحيد الهمزات والتاء المربوطة
     $normSubject = normalizeArabicSpelling($subject);
     $normSearch  = normalizeArabicSpelling($search);
     $normPattern = '/(?<=^|[\s,،\-\+\/\(\)\*\.])' . preg_quote($normSearch, '/') . '(?=$|[\s,،\-\+\/\(\)\*\.])/iu';
     return (bool) preg_match($normPattern, $normSubject);
 }
 
+/**
+ * تحليل رسالة الزبون بالاعتماد الحصري على المصادر الثلاثة:
+ * 1) الكلمات المفتاحية لأصناف التاجر في مخزونه الخاص
+ * 2) اسم السيارة من الإعدادات
+ * 3) تاريخ الصنع من الإعدادات
+ */
 function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     $normText         = normalizeArabicDigits($text);
     $detectedCar      = null;
     $detectedCategory = null;
     $detectedYear     = null;
     $remainingText    = $normText;
+    $protectedWords   = getProtectedPartWords();
 
     // 1. استخراج أرقام القطع (Part Numbers)
     $extractedPartNumbers = [];
@@ -1671,38 +1931,41 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
     }
     $extractedPartNumbers = array_values(array_unique($extractedPartNumbers));
 
-    // 2. استخراج السيارة ومرادفاتها (مع مطابقة الكلمات الكاملة فقط لمنع قص حروف القطع مثل صدام أو صاجة)
+    // 2. استخراج السيارة ومرادفاتها من الإعدادات (مع عدم حذف أي كلمة قطعة محمية مثل "زيت" أو "هواء")
     $carsList = DB::table('cars')->get();
     foreach ($carsList as $car) {
         if (containsWholeWordArabicSafe($remainingText, $car->car_name)) {
             $detectedCar      = $car->car_name;
             $detectedCategory = $car->category;
             $remainingText    = replaceWholeWordArabicSafe($remainingText, $car->car_name);
-            if (!empty($car->category)) {
+            if (!empty($car->category) && !in_array(normalizeArabicSpelling($car->category), $protectedWords, true)) {
                 $remainingText = replaceWholeWordArabicSafe($remainingText, $car->category);
             }
             break;
         }
         $aliases = DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray();
         foreach ($aliases as $alias) {
-            if ($alias !== '' && containsWholeWordArabicSafe($remainingText, $alias)) {
+            $aliasNorm = normalizeArabicSpelling($alias);
+            if ($alias !== '' && !in_array($aliasNorm, $protectedWords, true) && containsWholeWordArabicSafe($remainingText, $alias)) {
                 $detectedCar      = $car->car_name;
                 $detectedCategory = $car->category;
                 $remainingText    = replaceWholeWordArabicSafe($remainingText, $alias);
-                if (!empty($car->category)) {
+                if (!empty($car->category) && !in_array(normalizeArabicSpelling($car->category), $protectedWords, true)) {
                     $remainingText = replaceWholeWordArabicSafe($remainingText, $car->category);
                 }
                 break 2;
             }
         }
     }
+
+    // إزالة فئة السيارة فقط إذا لم تكن من الكلمات المحمية لقطع الغيار
     foreach ($carsList as $car) {
-        if (!empty($car->category) && containsWholeWordArabicSafe($remainingText, $car->category)) {
+        if (!empty($car->category) && !in_array(normalizeArabicSpelling($car->category), $protectedWords, true) && containsWholeWordArabicSafe($remainingText, $car->category)) {
             $remainingText = replaceWholeWordArabicSafe($remainingText, $car->category);
         }
     }
 
-    // 3. استخراج سنة الصنع (الموديل)
+    // 3. استخراج سنة الصنع (الموديل) من الإعدادات أو الأرقام
     $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
     foreach ($patterns as $pattern) {
         $normPattern = normalizeArabicDigits(trim($pattern));
@@ -1729,7 +1992,7 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
         }
     }
 
-    // 4. تصفية كلمات التحية والدردشة واستخراج القطع الحقيقية فقط
+    // 4. تصفية كلمات التحية والدردشة واستخراج القطع المرتبطة بكلمات التاجر المفتاحية
     $stopWords     = getChatAndStopWords();
     $modifiersList = getPartModifierWords();
 
@@ -1749,7 +2012,7 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
                 continue;
             }
 
-            // معالجة واو العطف الملتصقة بالكلمة (مثل: وصدام أو ورديتر أو ويمين)
+            // معالجة واو العطف الملتصقة بالكلمة (مثل: وصدام أو وفلتر أو ويمين)
             if (mb_strlen($tokClean) >= 4 && mb_substr($tokClean, 0, 1) === 'و') {
                 $withoutWaw     = mb_substr($tokClean, 1);
                 $normWithoutWaw = normalizeArabicSpelling($withoutWaw);
@@ -1794,7 +2057,8 @@ function parseWhatsappText(string $text, ?int $ownerUserId = null): array {
 }
 
 /**
- * فحص دقيق: هل الكلمة معروفة كاسم قطعة غيار في القاموس القياسي أو قاموس المرادفات (item_keywords) أو أصناف التاجر؟
+ * فحص صارم: هل الكلمة موجودة في الكلمات المفتاحية المرتبطة بأصناف التاجر فقط في مخزونه الخاص؟
+ * (المصدر الأول الوحيد لترجمة القطع كما طلب المستخدم)
  */
 function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null): bool {
     $norm = normalizeArabicSpelling($word);
@@ -1802,18 +2066,25 @@ function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null
         return false;
     }
 
-    $variants        = getWordVariantsForSearch($norm);
-    $standardLexicon = getStandardAutoPartLexicon();
+    $variants = getWordVariantsForSearch($norm);
 
-    // 0. فحص فوري في القاموس القياسي الشامل لقطع الغيار (مثل صدام، صاجة، شمعة، رفرف، رديتر...)
-    foreach ($variants as $v) {
-        $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
-        if (in_array($v, $standardLexicon, true) || in_array($vNoAl, $standardLexicon, true)) {
-            return true;
+    if ($ownerUserId !== null) {
+        $tenantMap  = getTenantInventoryKeywordsMap($ownerUserId);
+        $tenantKws  = $tenantMap['all_words'];
+
+        foreach ($tenantKws as $kwNorm) {
+            $kwNoAl = (mb_strlen($kwNorm) > 4 && str_starts_with($kwNorm, 'ال')) ? mb_substr($kwNorm, 2) : $kwNorm;
+            foreach ($variants as $v) {
+                $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
+                if ($kwNorm === $v || $kwNoAl === $vNoAl) {
+                    return true;
+                }
+            }
         }
+        return false;
     }
 
-    // 1. فحص في جدول قاموس الكلمات المفتاحية (تطابق تام للكلمة الموحدة)
+    // في حال عدم تمرير مستخدم محدد، نفحص في جدول item_keywords العام
     $allKeywords = DB::table('item_keywords')->pluck('keyword')->toArray();
     foreach ($allKeywords as $kw) {
         $kwNorm = normalizeArabicSpelling($kw);
@@ -1826,50 +2097,25 @@ function isWordRecognizedInPartDictionary(string $word, ?int $ownerUserId = null
         }
     }
 
-    // 2. فحص في أسماء الأصناف الخاصة بالتاجر أو في قلب النظام العام (master_items)
-    $itemNamesPool = [];
-    if ($ownerUserId !== null) {
-        $itemNamesPool = DB::table('items')
-            ->where('user_id', $ownerUserId)
-            ->pluck('item_name')
-            ->toArray();
-    }
-    if (empty($itemNamesPool)) {
-        $itemNamesPool = DB::table('master_items')->limit(1000)->pluck('first_item_name')->toArray();
-    }
-
-    foreach ($itemNamesPool as $iName) {
-        $tokens = preg_split('/[\s,\-\+\/\(\)\*\.]+/u', normalizeArabicSpelling($iName), -1, PREG_SPLIT_NO_EMPTY);
-        foreach ($tokens as $tk) {
-            $tkNoAl = (mb_strlen($tk) > 4 && str_starts_with($tk, 'ال')) ? mb_substr($tk, 2) : $tk;
-            foreach ($variants as $v) {
-                $vNoAl = (mb_strlen($v) > 4 && str_starts_with($v, 'ال')) ? mb_substr($v, 2) : $v;
-                if ($tk === $v || ($tkNoAl === $vNoAl && mb_strlen($vNoAl) >= 3)) {
-                    return true;
-                }
-            }
-        }
-    }
-
     return false;
 }
 
 /**
- * دالة التحقق الذكية الصارمة:
- * هل رسالة الزبون تمثل استعلاماً حقيقياً عن قطع غيار أم مجرد تحية/دردشة؟
+ * التحقق الذكي الصارم:
+ * هل رسالة الزبون تحتوي على قطعة موجودة في الكلمات المفتاحية لمخزون التاجر؟
  */
 function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ownerUserId): bool {
-    // 1. إذا أرسل رقم قطعة صريح -> استعلام حقيقي
+    // 1. إذا أرسل رقم قطعة صريح موجود في المخزون
     if (!empty($parsed['part_numbers'])) {
         return true;
     }
 
-    // 2. إذا لم يتبقَّ أي كلمات بعد حذف التحيات والسيارة والموديل -> ليست طلب قطعة
+    // 2. إذا لم يتبقَّ أي كلمات بعد حذف التحيات والسيارة والموديل
     if (empty($parsed['parts_list'])) {
         return false;
     }
 
-    // 3. التحقق مما إذا كانت الكلمات المتبقية في parts_list تحتوي على اسم قطعة معروفة في القاموس
+    // 3. التحقق الصارم مما إذا كانت الكلمات المطلوبة موجودة في الكلمات المفتاحية لأصناف التاجر في مخزونه الخاص
     $modifiers = getPartModifierWords();
     foreach ($parsed['parts_list'] as $partPhrase) {
         $words = preg_split('/\s+/u', $partPhrase, -1, PREG_SPLIT_NO_EMPTY);
@@ -1880,34 +2126,6 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
             }
             if (isWordRecognizedInPartDictionary($wNorm, $ownerUserId)) {
                 return true;
-            }
-        }
-    }
-
-    // 4. إذا كتب الزبون كلمة طلب صريحة (مثل: ابغى، مطلوب، عندكم، قطعة) أو أرسل سيارة/موديل مع اسم قطعة
-    $normMsg = normalizeArabicSpelling($messageText);
-    $explicitIntentWords = ['قطعه', 'قطع', 'غيار', 'ابغي', 'ابغا', 'ابي', 'عندكم', 'متوفر', 'يتوفر', 'احصل', 'مطلوب', 'بغيت', 'احتاج', 'اريد', 'بكم', 'سعر'];
-    $hasExplicitTrigger  = (!empty($parsed['car']) || !empty($parsed['year']));
-
-    if (!$hasExplicitTrigger) {
-        $msgTokens = preg_split('/[\s,،\?\!]+/u', $normMsg, -1, PREG_SPLIT_NO_EMPTY);
-        foreach ($explicitIntentWords as $intentWord) {
-            $normIntent = normalizeArabicSpelling($intentWord);
-            if (in_array($normIntent, $msgTokens, true) || in_array('و' . $normIntent, $msgTokens, true)) {
-                $hasExplicitTrigger = true;
-                break;
-            }
-        }
-    }
-
-    if ($hasExplicitTrigger && !empty($parsed['parts_list'])) {
-        foreach ($parsed['parts_list'] as $partPhrase) {
-            $words = preg_split('/\s+/u', $partPhrase, -1, PREG_SPLIT_NO_EMPTY);
-            foreach ($words as $w) {
-                $wNorm = normalizeArabicSpelling($w);
-                if (mb_strlen($wNorm) >= 3 && !in_array($wNorm, $modifiers, true) && !in_array($wNorm, getChatAndStopWords(), true)) {
-                    return true;
-                }
             }
         }
     }
@@ -1923,16 +2141,19 @@ function hasGenuinePartInquiryIntent(string $messageText, array $parsed, int $ow
 
 function getUserBotSettings(int $userId): array {
     $defaults = [
-        'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالسعر: {price} ريال",
-        'reply_unavailable'     => "نعتذر منك، القطعة المطلوبة ({part}) لسيارة {car} موديل {year} غير متوفرة حالياً ❌",
-        'reply_ask_car'         => "حياك الله، فضلاً ما هو نوع أو اسم السيارة؟",
-        'reply_ask_year'        => "فضلاً كم موديل (سنة صنع) السيارة {car}؟",
-        'reply_quota_exceeded'  => "",
-        'max_queries_per_phone' => "0",
-        'allow_group_replies'   => "0",
-        'whatsapp_api_url'      => "",
-        'whatsapp_api_token'    => "",
-        'whatsapp_session_id'   => "",
+        'reply_available'              => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالسعر: {price} ريال",
+        'reply_unavailable'            => "نعتذر منك، القطعة المطلوبة ({part}) لسيارة {car} موديل {year} غير متوفرة حالياً ❌",
+        'reply_ask_car'                => "حياك الله، فضلاً ما هو نوع أو اسم السيارة؟",
+        'reply_ask_year'               => "فضلاً كم موديل (سنة صنع) السيارة {car}؟",
+        'reply_did_you_mean'           => "هل تقصد ({suggested_item}) لسيارة {car} موديل {year}؟\nيرجى الرد بـ (نعم) للتأكيد أو توضيح القطعة المطلوبة.",
+        'confidence_direct_threshold'  => "80",
+        'confidence_suggest_threshold' => "40",
+        'reply_quota_exceeded'         => "",
+        'max_queries_per_phone'        => "0",
+        'allow_group_replies'          => "0",
+        'whatsapp_api_url'             => "",
+        'whatsapp_api_token'           => "",
+        'whatsapp_session_id'          => "",
     ];
 
     $saved = DB::table('user_bot_settings')
@@ -1954,17 +2175,20 @@ function formatBotTemplate(string $template, array $data): string {
     }
 
     $replacements = [
-        '{item_name}'   => $data['item_name'] ?? '',
-        '{item_number}' => $data['item_number'] ?? '',
-        '{price}'       => $data['price'] ?? '',
-        '{quantity}'    => $data['quantity'] ?? '',
-        '{car}'         => $data['car'] ?? '',
-        '{category}'    => $data['category'] ?? '',
-        '{year}'        => $data['year'] ?? '',
-        '{part}'        => $data['part'] ?? '',
-        '{client_name}' => $data['client_name'] ?? '',
-        '{phone}'       => $data['phone'] ?? '',
-        '{items}'       => $data['items'] ?? '',
+        '{item_name}'      => $data['item_name'] ?? '',
+        '{item_number}'    => $data['item_number'] ?? '',
+        '{price}'          => $data['price'] ?? '',
+        '{quantity}'       => $data['quantity'] ?? '',
+        '{car}'            => $data['car'] ?? '',
+        '{category}'       => $data['category'] ?? '',
+        '{year}'           => $data['year'] ?? '',
+        '{part}'           => $data['part'] ?? '',
+        '{client_name}'    => $data['client_name'] ?? '',
+        '{phone}'          => $data['phone'] ?? '',
+        '{items}'          => $data['items'] ?? '',
+        '{suggested_item}' => $data['suggested_item'] ?? ($data['item_name'] ?? ''),
+        '{suggested_list}' => $data['suggested_list'] ?? ($data['items'] ?? ''),
+        '{confidence}'     => $data['confidence'] ?? '',
     ];
 
     return str_replace(array_keys($replacements), array_values($replacements), $template);
@@ -2256,31 +2480,76 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'session_cancelled_silently'], 200);
     }
 
-    // تحليل الرسالة
-    $parsed      = parseWhatsappText($messageText, $ownerUserId);
-    $hasPartIntent = hasGenuinePartInquiryIntent($messageText, $parsed, $ownerUserId);
-
-    // فحص صارم لمنع الرد على "السلام عليكم" أو "كيفك" أو الدردشة العامة:
-    // 1. إذا لم تكن هناك جلسة سابقة، والرسالة لا تحتوي على طلب قطعة غيار حقيقي -> تجاهل تام
-    if (!$session && !$hasPartIntent) {
-        return response()->json(['status' => 'ignored_non_inquiry_chat'], 200);
-    }
-
-    // 2. إذا كانت هناك جلسة سابقة (البوت ينتظر اسم السيارة أو الموديل)، وأرسل العميل "السلام عليكم" أو "كيفك" (لا سيارة، لا موديل، لا قطعة) -> تجاهل تام دون إزعاج العميل
-    if ($session && !$hasPartIntent && empty($parsed['car']) && empty($parsed['year'])) {
-        return response()->json(['status' => 'ignored_greeting_during_session'], 200);
-    }
-
-    // فحص الحصة (Quota) والاستثناءات بعد التأكد من أن الرسالة استعلام حقيقي
     $msgAskCar        = trim($settings['reply_ask_car'] ?? '');
     $msgAskYear       = trim($settings['reply_ask_year'] ?? '');
     $msgAvailable     = trim($settings['reply_available'] ?? '');
     $msgUnavailable   = trim($settings['reply_unavailable'] ?? '');
+    $msgDidYouMean    = trim($settings['reply_did_you_mean'] ?? '');
     $msgQuotaExceeded = trim($settings['reply_quota_exceeded'] ?? '');
     $maxQueriesLimit  = (int) ($settings['max_queries_per_phone'] ?? 0);
+    $directThreshold  = max(1, min(100, (int) ($settings['confidence_direct_threshold'] ?? 80)));
+    $suggestThreshold = max(1, min($directThreshold, (int) ($settings['confidence_suggest_threshold'] ?? 40)));
     $sessionId        = trim($settings['whatsapp_session_id'] ?? '');
     $convId           = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
 
+    // معالجة رد العميل بـ (نعم / ايوه / صح) عندما يكون هناك اقتراح معلق ("هل تقصد؟")
+    if ($session && !empty($session->pending_suggestion_ids) && isAffirmativeConfirmationMessage($messageText)) {
+        $suggestedIds = json_decode((string) $session->pending_suggestion_ids, true) ?: [];
+        $confirmedItems = Item::where('user_id', $ownerUserId)
+            ->where('quantity', '>', 0)
+            ->whereIn('id', $suggestedIds)
+            ->get();
+
+        $replyBlocks = [];
+        foreach ($confirmedItems as $cItem) {
+            if ($msgAvailable !== '') {
+                $replyBlocks[] = formatBotTemplate($msgAvailable, [
+                    'item_name'      => $cItem->item_name,
+                    'item_number'    => $cItem->item_number,
+                    'price'          => (string) $cItem->price,
+                    'quantity'       => (string) $cItem->quantity,
+                    'car'            => $session->detected_car ?? ($cItem->detected_car_name ?? ''),
+                    'category'       => $cItem->detected_category ?? '',
+                    'year'           => $session->detected_year ?? ($cItem->detected_years ?? ''),
+                    'part'           => $session->part_query ?? $cItem->item_name,
+                    'client_name'    => $ownerUser->name ?? '',
+                    'phone'          => $quotaPhoneKey,
+                    'items'          => "- {$cItem->item_name} (رقم: {$cItem->item_number}) | السعر: {$cItem->price} ريال",
+                    'suggested_item' => $cItem->item_name,
+                    'confidence'     => '100%',
+                ]);
+            }
+        }
+
+        DB::table('whatsapp_sessions')->where('id', $session->id)->delete();
+
+        $finalConfirmedReply = implode("\n\n", array_values(array_unique(array_filter($replyBlocks))));
+        if ($finalConfirmedReply !== '') {
+            sendWhatsappReplyMessage($settings, $cleanPhone, $rawSender, $convId, $finalConfirmedReply);
+        }
+
+        return response()->json([
+            'status'     => 'confirmed_suggestion_replied',
+            'session_id' => $sessionId,
+            'reply'      => $finalConfirmedReply,
+        ], 200);
+    }
+
+    // تحليل الرسالة بالمصادر الثلاثة
+    $parsed        = parseWhatsappText($messageText, $ownerUserId);
+    $hasPartIntent = hasGenuinePartInquiryIntent($messageText, $parsed, $ownerUserId);
+
+    // 1. إذا لم تكن هناك جلسة سابقة، والرسالة لا تحتوي على قطعة في الكلمات المفتاحية لمخزون التاجر -> تجاهل تام
+    if (!$session && !$hasPartIntent) {
+        return response()->json(['status' => 'ignored_non_inquiry_chat'], 200);
+    }
+
+    // 2. إذا كانت هناك جلسة سابقة، وأرسل العميل دردشة عامة (لا سيارة، لا موديل، لا قطعة) -> تجاهل تام
+    if ($session && !$hasPartIntent && empty($parsed['car']) && empty($parsed['year'])) {
+        return response()->json(['status' => 'ignored_greeting_during_session'], 200);
+    }
+
+    // فحص الحصة (Quota) والاستثناءات
     $isWhitelisted = DB::table('whatsapp_whitelist_phones')
         ->where('user_id', $ownerUserId)
         ->where('phone', $quotaPhoneKey)
@@ -2322,17 +2591,19 @@ function handleWebhook(Request $request) {
             if ($item) {
                 if ($msgAvailable !== '') {
                     $replyBlocks[] = formatBotTemplate($msgAvailable, [
-                        'item_name'   => $item->item_name,
-                        'item_number' => $item->item_number,
-                        'price'       => (string) $item->price,
-                        'quantity'    => (string) $item->quantity,
-                        'car'         => $item->detected_car_name ?? '',
-                        'category'    => $item->detected_category ?? '',
-                        'year'        => $item->detected_years ?? '',
-                        'part'        => $pNum,
-                        'client_name' => $ownerUser->name ?? '',
-                        'phone'       => $quotaPhoneKey,
-                        'items'       => "- {$item->item_name} (رقم: {$item->item_number}) | السعر: {$item->price} ريال",
+                        'item_name'      => $item->item_name,
+                        'item_number'    => $item->item_number,
+                        'price'          => (string) $item->price,
+                        'quantity'       => (string) $item->quantity,
+                        'car'            => $item->detected_car_name ?? '',
+                        'category'       => $item->detected_category ?? '',
+                        'year'           => $item->detected_years ?? '',
+                        'part'           => $pNum,
+                        'client_name'    => $ownerUser->name ?? '',
+                        'phone'          => $quotaPhoneKey,
+                        'items'          => "- {$item->item_name} (رقم: {$item->item_number}) | السعر: {$item->price} ريال",
+                        'suggested_item' => $item->item_name,
+                        'confidence'     => '100%',
                     ]);
                 }
             } else {
@@ -2383,7 +2654,7 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
-    // ميزة التبديل الذكي للسياق: إذا بدأ العميل طلباً جديداً بسيارة جديدة وقطعة جديدة، نستبدل الجلسة القديمة
+    // إذا بدأ العميل طلباً جديداً بسيارة جديدة وقطعة جديدة، نستبدل الجلسة القديمة
     if ($session && !empty($parsed['car']) && !empty($parsed['parts_list']) && $session->detected_car && $session->detected_car !== $parsed['car']) {
         DB::table('whatsapp_sessions')->where('id', $session->id)->delete();
         $session = null;
@@ -2396,11 +2667,17 @@ function handleWebhook(Request $request) {
     if (!empty($session->part_query)) {
         $existingParts = array_values(array_filter(array_map('trim', explode('|', $session->part_query))));
     }
-    $newParts        = array_merge($parsed['part_numbers'], $parsed['parts_list']);
-    $mergedPartsList = expandCompoundDirectionalRequests(array_values(array_unique(array_merge($existingParts, $newParts))));
+
+    // إذا كان العميل يوضح اسم القطعة بعد سؤال "هل تقصد؟"، نحدث القطعة المطلوبة بالوصف الجديد
+    $newParts = array_merge($parsed['part_numbers'], $parsed['parts_list']);
+    if ($session && !empty($session->pending_suggestion_ids) && !empty($newParts)) {
+        $mergedPartsList = expandCompoundDirectionalRequests(array_values(array_unique($newParts)));
+    } else {
+        $mergedPartsList = expandCompoundDirectionalRequests(array_values(array_unique(array_merge($existingParts, $newParts))));
+    }
+
     $partQueryString = implode(' | ', $mergedPartsList);
 
-    // إذا لم يكن هناك أي قطعة مطلوبة حتى الآن، لا ننشئ جلسة وهمية ولا نرد
     if (empty($mergedPartsList)) {
         return response()->json(['status' => 'ignored_no_part_requested'], 200);
     }
@@ -2409,22 +2686,24 @@ function handleWebhook(Request $request) {
 
     if ($session) {
         DB::table('whatsapp_sessions')->where('id', $session->id)->update([
-            'detected_car'      => $car,
-            'detected_year'     => $year,
-            'part_query'        => $partQueryString,
-            'full_conversation' => $fullConv,
-            'updated_at'        => now(),
+            'detected_car'           => $car,
+            'detected_year'          => $year,
+            'part_query'             => $partQueryString,
+            'pending_suggestion_ids' => null,
+            'full_conversation'      => $fullConv,
+            'updated_at'             => now(),
         ]);
     } else {
         DB::table('whatsapp_sessions')->insert([
-            'user_id'           => $ownerUserId,
-            'phone'             => $quotaPhoneKey,
-            'detected_car'      => $car,
-            'detected_year'     => $year,
-            'part_query'        => $partQueryString,
-            'full_conversation' => $fullConv,
-            'created_at'        => now(),
-            'updated_at'        => now(),
+            'user_id'                => $ownerUserId,
+            'phone'                  => $quotaPhoneKey,
+            'detected_car'           => $car,
+            'detected_year'          => $year,
+            'part_query'             => $partQueryString,
+            'pending_suggestion_ids' => null,
+            'full_conversation'      => $fullConv,
+            'created_at'             => now(),
+            'updated_at'             => now(),
         ]);
     }
 
@@ -2437,19 +2716,23 @@ function handleWebhook(Request $request) {
     $readablePartsSummary = implode(' ، ', $mergedPartsList);
 
     $baseTemplateVars = [
-        'item_name'   => '',
-        'item_number' => '',
-        'price'       => '',
-        'quantity'    => '',
-        'car'         => $car ?? '',
-        'category'    => $carCategory,
-        'year'        => $year ?? '',
-        'part'        => $readablePartsSummary ?: $messageText,
-        'client_name' => $ownerUser->name ?? '',
-        'phone'       => $quotaPhoneKey,
-        'items'       => '',
+        'item_name'      => '',
+        'item_number'    => '',
+        'price'          => '',
+        'quantity'       => '',
+        'car'            => $car ?? '',
+        'category'       => $carCategory,
+        'year'           => $year ?? '',
+        'part'           => $readablePartsSummary ?: $messageText,
+        'client_name'    => $ownerUser->name ?? '',
+        'phone'          => $quotaPhoneKey,
+        'items'          => '',
+        'suggested_item' => '',
+        'suggested_list' => '',
+        'confidence'     => '',
     ];
 
+    // إذا لم يذكر اسم السيارة بعد -> يطلب البوت اسم السيارة
     if (!$car) {
         if ($msgAskCar === '') {
             return response()->json(['status' => 'skipped_empty_ask_car_template'], 200);
@@ -2467,6 +2750,7 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
+    // إذا لم يذكر سنة الصنع بعد -> يطلب البوت سنة الصنع
     if (!$year) {
         if ($msgAskYear === '') {
             return response()->json(['status' => 'skipped_empty_ask_year_template'], 200);
@@ -2484,43 +2768,89 @@ function handleWebhook(Request $request) {
         ], 200);
     }
 
+    // بعد اكتمال المصادر الثلاثة (القطعة من الكلمات المفتاحية + السيارة + سنة الصنع)، نفحص نسبة التطابق الذكية
+    $pendingSuggestionIds = [];
+    $hasDidYouMeanReply   = false;
+
     foreach ($mergedPartsList as $singlePartRequest) {
         $singlePartRequest = trim($singlePartRequest);
         if ($singlePartRequest === '') continue;
 
-        $foundForThisPart = findMatchingItemsForSinglePart($singlePartRequest, $car, $year, $ownerUserId);
+        $eval = evaluateSinglePartWithConfidence($singlePartRequest, $car, $year, $ownerUserId);
+        $bestConfidence = $eval['best_confidence'] ?? 0;
+        $allScored      = $eval['all_scored'] ?? collect();
 
-        if ($foundForThisPart->count() > 0) {
-            foreach ($foundForThisPart as $matchedItem) {
+        if ($bestConfidence >= $directThreshold && $allScored->isNotEmpty()) {
+            // نسبة التطابق وصلت إلى الحد المباشر (مثلاً 80% أو 100%) -> إجابة مباشرة بالتوفر والسعر
+            $highItems = $allScored->filter(fn($i) => $i->confidence_score >= $directThreshold);
+            foreach ($highItems as $matchedItem) {
                 if ($msgAvailable !== '') {
-                    $itemVars                = $baseTemplateVars;
-                    $itemVars['item_name']   = $matchedItem->item_name;
-                    $itemVars['item_number'] = $matchedItem->item_number;
-                    $itemVars['price']       = (string) $matchedItem->price;
-                    $itemVars['quantity']    = (string) $matchedItem->quantity;
-                    $itemVars['part']        = $singlePartRequest;
-                    $itemVars['items']       = "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
+                    $itemVars                   = $baseTemplateVars;
+                    $itemVars['item_name']      = $matchedItem->item_name;
+                    $itemVars['item_number']    = $matchedItem->item_number;
+                    $itemVars['price']          = (string) $matchedItem->price;
+                    $itemVars['quantity']       = (string) $matchedItem->quantity;
+                    $itemVars['part']           = $singlePartRequest;
+                    $itemVars['items']          = "- {$matchedItem->item_name} (رقم: {$matchedItem->item_number}) | السعر: {$matchedItem->price} ريال";
+                    $itemVars['suggested_item'] = $matchedItem->item_name;
+                    $itemVars['confidence']     = $matchedItem->confidence_score . '%';
 
                     $replyBlocks[] = formatBotTemplate($msgAvailable, $itemVars);
                 }
             }
+        } elseif ($bestConfidence >= $suggestThreshold && $allScored->isNotEmpty() && $msgDidYouMean !== '') {
+            // نسبة التطابق متوسطة (مثلاً بين 40% و 79%) -> يرد البوت بـ "هل تقصد كذا وكذا؟"
+            $mediumItems = $allScored->filter(fn($i) => $i->confidence_score >= $suggestThreshold);
+            $topSuggested = $mediumItems->first();
+            $suggestedNamesList = [];
+
+            foreach ($mediumItems as $mItem) {
+                $pendingSuggestionIds[] = $mItem->id;
+                $suggestedNamesList[]   = "- {$mItem->item_name} (السعر: {$mItem->price} ريال)";
+            }
+
+            $suggestVars                   = $baseTemplateVars;
+            $suggestVars['item_name']      = $topSuggested->item_name;
+            $suggestVars['item_number']    = $topSuggested->item_number;
+            $suggestVars['price']          = (string) $topSuggested->price;
+            $suggestVars['quantity']       = (string) $topSuggested->quantity;
+            $suggestVars['part']           = $singlePartRequest;
+            $suggestVars['suggested_item'] = implode(' أو ', $mediumItems->pluck('item_name')->toArray());
+            $suggestVars['suggested_list'] = implode("\n", $suggestedNamesList);
+            $suggestVars['items']          = $suggestVars['suggested_list'];
+            $suggestVars['confidence']     = $bestConfidence . '%';
+
+            $replyBlocks[]      = formatBotTemplate($msgDidYouMean, $suggestVars);
+            $hasDidYouMeanReply = true;
         } else {
+            // النسبة أقل من حد الاقتراح أو لا يوجد تطابق (مثلاً طلب فلتر زيت والموجود فلتر هواء فقط -> النسبة 0%)
             $unavailablePartsNames[] = $singlePartRequest;
         }
     }
 
     if (!empty($unavailablePartsNames) && $msgUnavailable !== '') {
-        $missingSummary          = implode(' ، ', array_unique($unavailablePartsNames));
-        $unavailVars             = $baseTemplateVars;
+        $missingSummary           = implode(' ، ', array_unique($unavailablePartsNames));
+        $unavailVars              = $baseTemplateVars;
         $unavailVars['part']      = $missingSummary;
         $unavailVars['item_name'] = $missingSummary;
-        $replyBlocks[]           = formatBotTemplate($msgUnavailable, $unavailVars);
+        $replyBlocks[]            = formatBotTemplate($msgUnavailable, $unavailVars);
     }
 
-    DB::table('whatsapp_sessions')
-        ->where('user_id', $ownerUserId)
-        ->where('phone', $quotaPhoneKey)
-        ->delete();
+    // إذا كان الرد يحتوي على سؤال "هل تقصد؟"، نبقي الجلسة مفتوحة مع حفظ الأصناف المقترحة لكي يؤكدها العميل
+    if ($hasDidYouMeanReply && !empty($pendingSuggestionIds)) {
+        DB::table('whatsapp_sessions')
+            ->where('user_id', $ownerUserId)
+            ->where('phone', $quotaPhoneKey)
+            ->update([
+                'pending_suggestion_ids' => json_encode(array_values(array_unique($pendingSuggestionIds))),
+                'updated_at'             => now(),
+            ]);
+    } else {
+        DB::table('whatsapp_sessions')
+            ->where('user_id', $ownerUserId)
+            ->where('phone', $quotaPhoneKey)
+            ->delete();
+    }
 
     DB::table('whatsapp_customer_quotas')->updateOrInsert(
         ['user_id' => $ownerUserId, 'phone' => $quotaPhoneKey],
@@ -2742,7 +3072,6 @@ Route::middleware('auth')->group(function () {
 
             $userId = auth()->id();
 
-            // 1. دعم الدفعات المرسلة عبر AJAX/WebWorker مع المعالجة الجماعية في الذاكرة (Bulk Upsert)
             if ($request->has('items_batch') && is_array($request->input('items_batch'))) {
                 $batch      = $request->input('items_batch');
                 $isFirst    = $request->boolean('is_first_chunk', false);
@@ -2799,7 +3128,6 @@ Route::middleware('auth')->group(function () {
                 ]);
             }
 
-            // 2. في حال رفع ملف كامل مباشرة (Background Queue / FastCGI Finish Request)
             $uploadedFile = $request->file('file') ?? $request->file('excel_file') ?? $request->file('import_file');
             if ($uploadedFile) {
                 $snapshotId = createInventoryRollbackSnapshot($userId, 'نسخة تلقائية قبل استيراد ملف ' . $uploadedFile->getClientOriginalName());
@@ -2830,7 +3158,6 @@ Route::middleware('auth')->group(function () {
                     'updated_at'     => now(),
                 ]);
 
-                // تنفيذ المهمة في الخلفية بعد إغلاق الاتصال مع المتصفح بحيث يستمر الرفع حتى لو تنقل المستخدم بين الصفحات
                 app()->terminating(function () use ($jobId) {
                     if (function_exists('fastcgi_finish_request')) {
                         @fastcgi_finish_request();
@@ -2850,7 +3177,6 @@ Route::middleware('auth')->group(function () {
                 return back()->with('success', 'تم بدء استيراد الملف في الخلفية وحفظ نقطة استرجاع فورية لمخزونك.');
             }
 
-            // الاحتفاظ بالتوافق مع ItemController في حال استدعائه بطرق أخرى
             createInventoryRollbackSnapshot($userId, 'نسخة تلقائية قبل الاستيراد');
             $response = app(ItemController::class)->import($request);
             DB::table('items')->whereNull('user_id')->update(['user_id' => $userId]);
@@ -2858,7 +3184,6 @@ Route::middleware('auth')->group(function () {
             return $response;
         })->name('import');
 
-        // مسار المعاينة الذكية واكتشاف أعمدة ملف الإكسل تلقائياً (Smart Column Mapping Preview)
         Route::post('/import/detect-columns', function (Request $request) {
             $headers = $request->input('headers', []);
             if (empty($headers) && $request->hasFile('file')) {
@@ -2873,7 +3198,6 @@ Route::middleware('auth')->group(function () {
             ]);
         })->name('import.detect_columns');
 
-        // مسار متابعة حالة الاستيراد في الخلفية عبر جميع الصفحات (Background Progress Status)
         Route::get('/import/status', function (Request $request) {
             $userId = auth()->id();
             $jobId  = $request->query('job_id');
@@ -2887,7 +3211,6 @@ Route::middleware('auth')->group(function () {
 
             $job = $query->first();
             if ($job && $job->status === 'pending') {
-                // إذا كانت المهمة معلقة، نشغلها في الخلفية
                 app()->terminating(function () use ($job) {
                     if (function_exists('fastcgi_finish_request')) {
                         @fastcgi_finish_request();
@@ -2917,7 +3240,6 @@ Route::middleware('auth')->group(function () {
             ]);
         })->name('import.status');
 
-        // مسار نقطة الاسترجاع الفورية بضغطة زر (One-Click Rollback)
         Route::post('/import/rollback', function (Request $request) {
             $userId     = auth()->id();
             $snapshotId = $request->input('snapshot_id') ? (int) $request->input('snapshot_id') : null;
@@ -3021,11 +3343,10 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حذف العميل وجميع أصنافه بنجاح.');
     })->name('clients.destroy');
 
-    // 3. المخزون المشترك (قلب النظام) - سريع جداً مع دعم البحث وتقسيم الصفحات (Pagination)
+    // 3. المخزون المشترك (قلب النظام)
     Route::get('/master-catalog', function (Request $request) {
         if (auth()->user()->role !== 'admin') abort(403);
 
-        // لا يتم تشغيل المزامنة الشاملة إلا عند الضغط على زر المزامنة أو إذا كان الجدول فارغاً
         if ($request->boolean('sync') || DB::table('master_items')->count() === 0) {
             syncAllExistingItemsToCore();
         }
@@ -3198,11 +3519,13 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم الحذف.');
     })->name('year.pattern.destroy');
 
-    // 6. مسارات الرد الآلي والذكاء الاصطناعي والحدود والاستثناءات
+    // 6. مسارات الرد الآلي والذكاء الاصطناعي والحدود والاستثناءات ونسب التطابق
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId          = auth()->id();
         $customerMessage = (string) $request->query('message', '');
         $matchedItems    = collect();
+        $botSettings     = getUserBotSettings($userId);
+        $suggestMin      = max(1, (int) ($botSettings['confidence_suggest_threshold'] ?? 40));
 
         if (trim($customerMessage) !== '') {
             $parsedTest = parseWhatsappText($customerMessage, $userId);
@@ -3210,7 +3533,11 @@ Route::middleware('auth')->group(function () {
             if (!empty($parsedTest['part_numbers'])) {
                 $matchedItems = Item::where('user_id', $userId)
                     ->whereIn('item_number', $parsedTest['part_numbers'])
-                    ->get();
+                    ->get()
+                    ->map(function ($it) {
+                        $it->confidence_score = 100;
+                        return $it;
+                    });
             }
 
             if ($matchedItems->isEmpty() && !empty($parsedTest['parts_list'])) {
@@ -3218,7 +3545,7 @@ Route::middleware('auth')->group(function () {
                 $testYear = $parsedTest['year'] ?? '';
 
                 foreach ($parsedTest['parts_list'] as $singleReq) {
-                    $found = findMatchingItemsForSinglePart($singleReq, $testCar, $testYear, $userId);
+                    $found = findMatchingItemsForSinglePart($singleReq, $testCar, $testYear, $userId, $suggestMin);
                     foreach ($found as $fItem) {
                         $matchedItems->push($fItem);
                     }
@@ -3227,7 +3554,6 @@ Route::middleware('auth')->group(function () {
             }
         }
 
-        $botSettings    = getUserBotSettings($userId);
         $activeSessions = DB::table('whatsapp_sessions')
             ->where('user_id', $userId)
             ->latest('updated_at')
@@ -3262,6 +3588,9 @@ Route::middleware('auth')->group(function () {
             'reply_unavailable',
             'reply_ask_car',
             'reply_ask_year',
+            'reply_did_you_mean',
+            'confidence_direct_threshold',
+            'confidence_suggest_threshold',
             'reply_quota_exceeded',
             'max_queries_per_phone',
             'allow_group_replies',
@@ -3288,7 +3617,7 @@ Route::middleware('auth')->group(function () {
             }
         }
 
-        return back()->with('success', 'تم حفظ إعدادات البوت وحدود الاستعلام وقوالب الرسائل بنجاح.');
+        return back()->with('success', 'تم حفظ إعدادات البوت ونسب الذكاء وقوالب الرسائل بنجاح.');
     })->name('pages.second.settings');
 
     Route::post('/ai-whatsapp/whitelist', function (Request $request) {
