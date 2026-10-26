@@ -382,7 +382,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
             $prevYears = !empty($existingMaster->compatible_years) ? array_map('trim', explode('|', $existingMaster->compatible_years)) : [];
 
             $mergedCars  = implode(' | ', array_values(array_unique(array_filter(array_merge($prevCars, $masterCarsPool)))));
-            $mergedYears = implode(' | ', array_values(array_unique(array_filter(array_merge($prevYears, $masterYearsPool)))));
+            $mergedYears = implode(' | ', array_values(array_unique(array_filter(array_merge($prevYears, $mInfoYears ?? $masterYearsPool)))));
 
             DB::table('master_items')->where('item_number', $cleanNumber)->update([
                 'compatible_cars'  => $mergedCars ?: null,
@@ -1301,7 +1301,7 @@ function extractExcelItemsFromWhatsappPayload(array $payload): array {
 function getUserBotSettings(int $userId): array {
     $defaults = [
         'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالكمية المتوفرة: {quantity}\nالسعر: {price} ريال",
-        'reply_unavailable'     => "نعتذر منك، رقم الصنف المطلوب ({part}) غير متوفر حالياً ❌",
+        'reply_unavailable'     => "غير متوفر ❌",
         'reply_quota_exceeded'  => "نعتذر منك، لقد استنفدت الحد المسموح به للاستعلام الآلي.",
         'max_queries_per_phone' => "0",
         'quota_reset_period'    => "manual",
@@ -1355,6 +1355,41 @@ function formatBotTemplate(string $template, array $data): string {
 
     $output = preg_replace("/\n{3,}/", "\n\n", trim((string) $output));
     return $output;
+}
+
+/**
+ * توليد رسالة عدم التوفر لكل رقم صنف بشكل منفصل تماماً
+ */
+function buildSingleUnavailableItemReply(string $template, string $partNumber, string $clientName, string $phone): string {
+    $tpl = trim($template);
+    if ($tpl === '') {
+        return '';
+    }
+
+    $hasPartPlaceholder = str_contains($tpl, '{item_number}')
+                       || str_contains($tpl, '{part}')
+                       || str_contains($tpl, '{item_name}')
+                       || str_contains($tpl, '{items}');
+
+    $formatted = formatBotTemplate($tpl, [
+        'item_name'   => $partNumber,
+        'item_number' => $partNumber,
+        'price'       => '',
+        'quantity'    => '0',
+        'car'         => '',
+        'category'    => '',
+        'year'        => '',
+        'part'        => $partNumber,
+        'client_name' => $clientName,
+        'phone'       => $phone,
+        'items'       => $partNumber,
+    ]);
+
+    if (!$hasPartPlaceholder) {
+        return "{$partNumber} : {$formatted}";
+    }
+
+    return $formatted;
 }
 
 function resolveWebhookOwnerUserId(Request $request, array $payload): int {
@@ -1809,10 +1844,9 @@ function handleWebhook(Request $request) {
     $canShowPrices      = $whitelistRecord ? (bool) ($whitelistRecord->allow_prices ?? true) : true;
     $canShowQuantities  = $whitelistRecord ? (bool) ($whitelistRecord->allow_quantities ?? true) : true;
 
-    $replyBlocks           = [];
-    $unavailablePartsNames = [];
-    $countedQueries        = 0;
-    $now                   = now();
+    $replyBlocks    = [];
+    $countedQueries = 0;
+    $now            = now();
 
     foreach ($requestedItems as $reqEntry) {
         $pNum   = $reqEntry['part_number'];
@@ -1890,31 +1924,23 @@ function handleWebhook(Request $request) {
                 $isExcelSource ? 'excel' : 'text'
             );
 
+            // كتابة "غير متوفر" لكل صنف بشكل منفصل تماماً بدلاً من تجميعها
             if ($canShowUnavailable) {
                 if ($isExcelSource) {
                     $replyBlocks[] = "❌ *{$pNum}* : غير متوفر حالياً";
-                } else {
-                    $unavailablePartsNames[] = $pNum;
+                } elseif ($msgUnavailable !== '') {
+                    $singleUnavailBlock = buildSingleUnavailableItemReply(
+                        $msgUnavailable,
+                        $pNum,
+                        (string) ($ownerUser->name ?? ''),
+                        $quotaPhoneKey
+                    );
+                    if ($singleUnavailBlock !== '') {
+                        $replyBlocks[] = $singleUnavailBlock;
+                    }
                 }
             }
         }
-    }
-
-    if (!$isExcelSource && $canShowUnavailable && !empty($unavailablePartsNames) && $msgUnavailable !== '') {
-        $combinedMissing = implode(' ، ', array_unique($unavailablePartsNames));
-        $replyBlocks[] = formatBotTemplate($msgUnavailable, [
-            'item_name'   => $combinedMissing,
-            'item_number' => $combinedMissing,
-            'price'       => '',
-            'quantity'    => '0',
-            'car'         => '',
-            'category'    => '',
-            'year'        => '',
-            'part'        => $combinedMissing,
-            'client_name' => $ownerUser->name ?? '',
-            'phone'       => $quotaPhoneKey,
-            'items'       => '',
-        ]);
     }
 
     if ($quotaHitDuringBatch && $msgQuotaExceeded !== '') {
@@ -1973,8 +1999,503 @@ function handleWebhook(Request $request) {
 /**
  * حقن روابط الصفحات المستقلة الجديدة في القائمة الجانبية اليمنى (Sidebar) تلقائياً في كل الصفحات:
  * 1. رابط "🛡️ الاستثناءات والحصص" (تحت الرد الآلي مباشرة لجميع المستخدمين)
- * 2. رابط "📡 رادار الطلبات العام" (تحت قسم المدير للأدمن فقط)
+ * 2. رابط "📡 الاصناف المطلوبة" (تحت قسم المدير للأدمن فقط)
  */
+function injectAdminVisualEditor(string $html): string {
+    if (!auth()->check() || auth()->user()->role !== 'admin') {
+        return $html;
+    }
+
+    $currPath = request()->path() ?: '/';
+    $savedCustomizations = [];
+    try {
+        if (Schema::hasTable('ui_customizations')) {
+            $savedCustomizations = DB::table('ui_customizations')
+                ->whereIn('page_path', [$currPath, '*'])
+                ->get()
+                ->keyBy('selector')
+                ->toArray();
+        }
+    } catch (\Throwable $e) {
+        $savedCustomizations = [];
+    }
+
+    $savedJson = json_encode($savedCustomizations, JSON_UNESCAPED_UNICODE);
+    $saveUrl   = route('ui.customizations.save');
+    $resetUrl  = route('ui.customizations.reset');
+    $csrfToken = csrf_token();
+
+    $editorAssets = <<<HTML
+<!-- EPC Visual Live Mouse Editor -->
+<style>
+    .epc-ve-hover {
+        outline: 2px dashed #2563eb !important;
+        outline-offset: 2px !important;
+        cursor: pointer !important;
+        transition: outline 0.1s ease;
+    }
+    .epc-ve-selected {
+        outline: 3px solid #16a34a !important;
+        outline-offset: 3px !important;
+    }
+    #epc-ve-toggle-btn {
+        position: fixed;
+        bottom: 20px;
+        left: 20px;
+        z-index: 99998;
+        background: #0f172a;
+        color: #ffffff;
+        border: 2px solid #334155;
+        padding: 10px 18px;
+        border-radius: 999px;
+        font-weight: 800;
+        font-size: 13px;
+        cursor: pointer;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        direction: rtl;
+        transition: all 0.2s ease;
+    }
+    #epc-ve-toggle-btn.active {
+        background: #16a34a;
+        border-color: #bbf7d0;
+    }
+    #epc-ve-panel {
+        position: fixed;
+        top: 80px;
+        left: 20px;
+        width: 320px;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 16px;
+        box-shadow: 0 20px 35px rgba(15,23,42,0.2);
+        z-index: 99999;
+        display: none;
+        direction: rtl;
+        overflow: hidden;
+        font-family: inherit;
+    }
+    .epc-ve-header {
+        background: #0f172a;
+        color: #fff;
+        padding: 12px 16px;
+        font-weight: 800;
+        font-size: 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: move;
+    }
+    .epc-ve-body {
+        padding: 14px 16px;
+        max-height: 75vh;
+        overflow-y: auto;
+    }
+    .epc-ve-field {
+        margin-bottom: 10px;
+    }
+    .epc-ve-field label {
+        display: block;
+        font-size: 12px;
+        font-weight: 700;
+        color: #334155;
+        margin-bottom: 4px;
+    }
+    .epc-ve-field input[type="text"],
+    .epc-ve-field input[type="number"] {
+        width: 100%;
+        padding: 7px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        font-size: 13px;
+    }
+    .epc-ve-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+</style>
+
+<button type="button" id="epc-ve-toggle-btn" title="تفعيل أو إيقاف تعديل عناصر الصفحة بالماوس">
+    🎨 <span>تعديل الواجهة بالماوس: متوقف</span>
+</button>
+
+<div id="epc-ve-panel">
+    <div class="epc-ve-header" id="epc-ve-panel-header">
+        <span>🛠️ خصائص العنصر المحدد</span>
+        <button type="button" id="epc-ve-close" style="background:transparent;border:none;color:#fff;font-size:16px;cursor:pointer;">✕</button>
+    </div>
+    <div class="epc-ve-body">
+        <div class="epc-ve-field">
+            <label>النص / العنوان الداخلي:</label>
+            <input type="text" id="epc-ve-text" placeholder="نص الزر أو العنوان">
+        </div>
+        <div class="epc-ve-field" id="epc-ve-placeholder-wrap" style="display:none;">
+            <label>النص التوضيحي للخانة (Placeholder):</label>
+            <input type="text" id="epc-ve-placeholder" placeholder="مثال: ادخل رقم الصنف...">
+        </div>
+        <div class="epc-ve-grid">
+            <div class="epc-ve-field">
+                <label>لون الخلفية:</label>
+                <input type="color" id="epc-ve-bg" style="width:100%;height:34px;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">
+            </div>
+            <div class="epc-ve-field">
+                <label>لون الخط:</label>
+                <input type="color" id="epc-ve-color" style="width:100%;height:34px;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">
+            </div>
+        </div>
+        <div class="epc-ve-grid">
+            <div class="epc-ve-field">
+                <label>حجم الخط (px):</label>
+                <input type="number" id="epc-ve-fontsize" placeholder="14">
+            </div>
+            <div class="epc-ve-field">
+                <label>استدارة الحواف (px):</label>
+                <input type="number" id="epc-ve-radius" placeholder="8">
+            </div>
+        </div>
+        <div class="epc-ve-grid">
+            <div class="epc-ve-field">
+                <label>تحريك أفقي X (px):</label>
+                <input type="number" id="epc-ve-tx" value="0">
+            </div>
+            <div class="epc-ve-field">
+                <label>تحريك عمودي Y (px):</label>
+                <input type="number" id="epc-ve-ty" value="0">
+            </div>
+        </div>
+        <p style="margin:4px 0 10px 0;font-size:11px;color:#64748b;">💡 يمكنك أيضاً سحب العنصر بالماوس مع الضغط على زر <b>Alt</b> لتحريكه لمكانه الجديد.</p>
+        <div class="epc-ve-field">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#dc2626;">
+                <input type="checkbox" id="epc-ve-hide"> 👁️ إخفاء هذا العنصر من الصفحة
+            </label>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button type="button" id="epc-ve-save" style="flex:1;background:#16a34a;color:#fff;border:none;padding:9px;border-radius:8px;font-weight:700;cursor:pointer;">💾 حفظ التعديل</button>
+            <button type="button" id="epc-ve-reset-item" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;padding:9px 12px;border-radius:8px;font-weight:700;cursor:pointer;" title="إرجاع العنصر لحالته الأصلية">إرجاع</button>
+        </div>
+        <button type="button" id="epc-ve-reset-page" style="width:100%;margin-top:8px;background:#fee2e2;color:#991b1b;border:none;padding:7px;border-radius:8px;font-weight:700;font-size:12px;cursor:pointer;">
+            🔄 استعادة ضبط المصنع لكل عناصر هذه الصفحة
+        </button>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const savedCustomizations = {$savedJson};
+    const currPagePath = '{$currPath}';
+    const saveUrl = '{$saveUrl}';
+    const resetUrl = '{$resetUrl}';
+    const csrfToken = '{$csrfToken}';
+
+    let editMode = false;
+    let selectedEl = null;
+    let currentSelector = '';
+
+    // توليد مسار فريد ودقيق لأي عنصر في الصفحة أو العناصر المستقبلية
+    function getUniqueSelector(el) {
+        if (!el || el === document.body || el === document.documentElement) return '';
+        if (el.id && !el.id.startsWith('epc-ve-')) {
+            return '#' + CSS.escape(el.id);
+        }
+        const path = [];
+        let curr = el;
+        while (curr && curr !== document.body && curr.nodeType === 1) {
+            let tag = curr.tagName.toLowerCase();
+            if (curr.id && !curr.id.startsWith('epc-ve-')) {
+                path.unshift('#' + CSS.escape(curr.id));
+                break;
+            }
+            let nth = 1;
+            let sib = curr.previousElementSibling;
+            while (sib) {
+                if (sib.tagName === curr.tagName) nth++;
+                sib = sib.previousElementSibling;
+            }
+            path.unshift(tag + ':nth-of-type(' + nth + ')');
+            curr = curr.parentElement;
+        }
+        return path.join(' > ');
+    }
+
+    // تطبيق التعديلات المحفوظة مسبقاً عند فتح الصفحة
+    function applySavedCustomizationToElement(el, data) {
+        if (!el || !data) return;
+        let styles = {};
+        try {
+            styles = typeof data.styles === 'string' ? JSON.parse(data.styles) : (data.styles || {});
+        } catch (e) {}
+
+        if (data.text_content !== null && data.text_content !== undefined && data.text_content !== '') {
+            if (el.children.length === 0) {
+                el.textContent = data.text_content;
+            } else {
+                let updatedText = false;
+                el.childNodes.forEach(node => {
+                    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '' && !updatedText) {
+                        node.textContent = ' ' + data.text_content + ' ';
+                        updatedText = true;
+                    }
+                });
+                if (!updatedText && el.querySelector('span')) {
+                    el.querySelector('span').textContent = data.text_content;
+                }
+            }
+        }
+
+        if (data.placeholder !== null && data.placeholder !== undefined && data.placeholder !== '') {
+            el.setAttribute('placeholder', data.placeholder);
+        }
+
+        if (styles.backgroundColor) el.style.backgroundColor = styles.backgroundColor;
+        if (styles.color) el.style.color = styles.color;
+        if (styles.fontSize) el.style.fontSize = styles.fontSize + 'px';
+        if (styles.borderRadius) el.style.borderRadius = styles.borderRadius + 'px';
+        if (styles.tx || styles.ty) {
+            const x = parseInt(styles.tx || 0, 10);
+            const y = parseInt(styles.ty || 0, 10);
+            el.style.transform = `translate(\${x}px, \${y}px)`;
+            el.dataset.veTx = x;
+            el.dataset.veTy = y;
+        }
+        if (styles.hidden) {
+            el.style.display = 'none';
+        }
+    }
+
+    Object.keys(savedCustomizations).forEach(function (sel) {
+        try {
+            const el = document.querySelector(sel);
+            if (el) applySavedCustomizationToElement(el, savedCustomizations[sel]);
+        } catch (e) {}
+    });
+
+    const toggleBtn = document.getElementById('epc-ve-toggle-btn');
+    const panel = document.getElementById('epc-ve-panel');
+    const closeBtn = document.getElementById('epc-ve-close');
+
+    const inpText = document.getElementById('epc-ve-text');
+    const inpPlaceholder = document.getElementById('epc-ve-placeholder');
+    const wrapPlaceholder = document.getElementById('epc-ve-placeholder-wrap');
+    const inpBg = document.getElementById('epc-ve-bg');
+    const inpColor = document.getElementById('epc-ve-color');
+    const inpFontSize = document.getElementById('epc-ve-fontsize');
+    const inpRadius = document.getElementById('epc-ve-radius');
+    const inpTx = document.getElementById('epc-ve-tx');
+    const inpTy = document.getElementById('epc-ve-ty');
+    const inpHide = document.getElementById('epc-ve-hide');
+
+    function rgbToHex(rgb) {
+        if (!rgb || rgb === 'transparent' || rgb === 'rgba(0, 0, 0, 0)') return '#ffffff';
+        const m = rgb.match(/\d+/g);
+        if (!m || m.length < 3) return '#ffffff';
+        return '#' + m.slice(0, 3).map(x => parseInt(x).toString(16).padStart(2, '0')).join('');
+    }
+
+    function isEditorUi(el) {
+        if (!el) return false;
+        return el.id === 'epc-ve-toggle-btn' || el.closest('#epc-ve-toggle-btn') || el.closest('#epc-ve-panel');
+    }
+
+    toggleBtn.addEventListener('click', function () {
+        editMode = !editMode;
+        if (editMode) {
+            toggleBtn.classList.add('active');
+            toggleBtn.innerHTML = '🎨 <span>وضع التعديل بالماوس: مفعل (اضغط على أي عنصر)</span>';
+        } else {
+            toggleBtn.classList.remove('active');
+            toggleBtn.innerHTML = '🎨 <span>تعديل الواجهة بالماوس: متوقف</span>';
+            panel.style.display = 'none';
+            if (selectedEl) selectedEl.classList.remove('epc-ve-selected');
+            document.querySelectorAll('.epc-ve-hover').forEach(el => el.classList.remove('epc-ve-hover'));
+            selectedEl = null;
+        }
+    });
+
+    closeBtn.addEventListener('click', function () {
+        panel.style.display = 'none';
+        if (selectedEl) selectedEl.classList.remove('epc-ve-selected');
+        selectedEl = null;
+    });
+
+    document.addEventListener('mouseover', function (e) {
+        if (!editMode || isEditorUi(e.target)) return;
+        e.target.classList.add('epc-ve-hover');
+    }, true);
+
+    document.addEventListener('mouseout', function (e) {
+        if (!editMode || isEditorUi(e.target)) return;
+        e.target.classList.remove('epc-ve-hover');
+    }, true);
+
+    // اختيار أي عنصر بالماوس
+    document.addEventListener('click', function (e) {
+        if (!editMode || isEditorUi(e.target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (selectedEl) selectedEl.classList.remove('epc-ve-selected');
+        selectedEl = e.target;
+        selectedEl.classList.add('epc-ve-selected');
+        currentSelector = getUniqueSelector(selectedEl);
+
+        const comp = window.getComputedStyle(selectedEl);
+        inpText.value = selectedEl.innerText ? selectedEl.innerText.trim() : '';
+
+        if (selectedEl.tagName === 'INPUT' || selectedEl.tagName === 'TEXTAREA') {
+            wrapPlaceholder.style.display = 'block';
+            inpPlaceholder.value = selectedEl.getAttribute('placeholder') || '';
+        } else {
+            wrapPlaceholder.style.display = 'none';
+            inpPlaceholder.value = '';
+        }
+
+        inpBg.value = rgbToHex(comp.backgroundColor);
+        inpColor.value = rgbToHex(comp.color);
+        inpFontSize.value = parseInt(comp.fontSize, 10) || 14;
+        inpRadius.value = parseInt(comp.borderRadius, 10) || 0;
+        inpTx.value = parseInt(selectedEl.dataset.veTx || 0, 10);
+        inpTy.value = parseInt(selectedEl.dataset.veTy || 0, 10);
+        inpHide.checked = (comp.display === 'none');
+
+        panel.style.display = 'block';
+    }, true);
+
+    // معاينة حية فورية أثناء التغيير
+    function livePreview() {
+        if (!selectedEl) return;
+        if (inpText.value.trim() !== '' && selectedEl.children.length === 0 && selectedEl.tagName !== 'INPUT') {
+            selectedEl.textContent = inpText.value;
+        }
+        if (selectedEl.tagName === 'INPUT' || selectedEl.tagName === 'TEXTAREA') {
+            selectedEl.setAttribute('placeholder', inpPlaceholder.value);
+        }
+        selectedEl.style.backgroundColor = inpBg.value;
+        selectedEl.style.color = inpColor.value;
+        if (inpFontSize.value) selectedEl.style.fontSize = inpFontSize.value + 'px';
+        if (inpRadius.value !== '') selectedEl.style.borderRadius = inpRadius.value + 'px';
+
+        const tx = parseInt(inpTx.value || 0, 10);
+        const ty = parseInt(inpTy.value || 0, 10);
+        selectedEl.style.transform = `translate(\${tx}px, \${ty}px)`;
+        selectedEl.dataset.veTx = tx;
+        selectedEl.dataset.veTy = ty;
+
+        selectedEl.style.display = inpHide.checked ? 'none' : '';
+    }
+
+    [inpText, inpPlaceholder, inpBg, inpColor, inpFontSize, inpRadius, inpTx, inpTy, inpHide].forEach(inp => {
+        inp.addEventListener('input', livePreview);
+        inp.addEventListener('change', livePreview);
+    });
+
+    // سحب العنصر بالماوس مباشرة مع زر Alt
+    let draggingEl = false;
+    let startX = 0, startY = 0, origTx = 0, origTy = 0;
+    document.addEventListener('mousedown', function (e) {
+        if (!editMode || !e.altKey || !selectedEl || isEditorUi(e.target)) return;
+        e.preventDefault();
+        draggingEl = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        origTx = parseInt(selectedEl.dataset.veTx || 0, 10);
+        origTy = parseInt(selectedEl.dataset.veTy || 0, 10);
+    });
+    document.addEventListener('mousemove', function (e) {
+        if (!draggingEl || !selectedEl) return;
+        const nx = origTx + (e.clientX - startX);
+        const ny = origTy + (e.clientY - startY);
+        inpTx.value = nx;
+        inpTy.value = ny;
+        selectedEl.style.transform = `translate(\${nx}px, \${ny}px)`;
+        selectedEl.dataset.veTx = nx;
+        selectedEl.dataset.veTy = ny;
+    });
+    document.addEventListener('mouseup', function () {
+        draggingEl = false;
+    });
+
+    // حفظ التعديل في قاعدة البيانات
+    document.getElementById('epc-ve-save').addEventListener('click', function () {
+        if (!selectedEl || !currentSelector) return;
+        const btn = this;
+        btn.textContent = '⏳ جاري الحفظ...';
+
+        const payload = {
+            page_path: currPagePath,
+            selector: currentSelector,
+            text_content: inpText.value,
+            placeholder: inpPlaceholder.value,
+            styles: {
+                backgroundColor: inpBg.value,
+                color: inpColor.value,
+                fontSize: inpFontSize.value,
+                borderRadius: inpRadius.value,
+                tx: inpTx.value,
+                ty: inpTy.value,
+                hidden: inpHide.checked
+            }
+        };
+
+        fetch(saveUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': csrfToken,
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        })
+        .then(r => r.json())
+        .then(() => {
+            btn.textContent = '✅ تم الحفظ بنجاح!';
+            setTimeout(() => { btn.textContent = '💾 حفظ التعديل'; }, 1200);
+        })
+        .catch(() => {
+            btn.textContent = '💾 حفظ التعديل';
+        });
+    });
+
+    // إرجاع العنصر المحدد لحالته الأصلية
+    document.getElementById('epc-ve-reset-item').addEventListener('click', function () {
+        if (!currentSelector) return;
+        fetch(resetUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': csrfToken,
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({ page_path: currPagePath, selector: currentSelector })
+        }).then(() => window.location.reload());
+    });
+
+    // استعادة ضبط المصنع لكل الصفحة
+    document.getElementById('epc-ve-reset-page').addEventListener('click', function () {
+        if (!confirm('هل تريد استعادة الشكل الأصلي لجميع عناصر هذه الصفحة؟')) return;
+        fetch(resetUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': csrfToken,
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({ page_path: currPagePath })
+        }).then(() => window.location.reload());
+    });
+});
+</script>
+HTML;
+
+    if (str_contains($html, '</body>')) {
+        return str_replace('</body>', $editorAssets . "\n</body>", $html);
+    }
+    return $html . $editorAssets;
+}
+
 function injectSidebarNavigationLinks(string $html): string {
     $isAdmin   = auth()->check() && auth()->user()->role === 'admin';
     $quotasUrl = route('whatsapp.quotas.page');
@@ -2021,7 +2542,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const radarLink = masterLink.cloneNode(true);
             radarLink.id = 'epc-nav-radar';
             radarLink.href = '{$radarUrl}';
-            radarLink.innerHTML = '📡 <span style="margin-right:8px;">رادار الطلبات العام</span>';
+            radarLink.innerHTML = '📡 <span style="margin-right:8px;"> الاصناف المطلوبة  </span>';
 
             if ({$isRadarActive}) {
                 radarLink.style.background = '#16a34a';
@@ -2048,9 +2569,64 @@ document.addEventListener('DOMContentLoaded', function () {
 HTML;
 
     if (str_contains($html, '</body>')) {
-        return str_replace('</body>', $navScript . "\n</body>", $html);
+        $html = str_replace('</body>', $navScript . "\n</body>", $html);
+    } else {
+        $html .= $navScript;
     }
-    return $html . $navScript;
+
+    return injectAdminVisualEditor($html);
+}
+
+/**
+ * إزالة قسمي "الأرقام المستثناة (استعلام دائم)" و"استهلاك استعلامات العملاء" من صفحة الرد الآلي (/ai-whatsapp)
+ * لأنهم موجودين بشكل كامل ومفصل في صفحة "الاستثناءات والحصص" المستقلة
+ */
+function stripDuplicateQuotaCardsFromSecondPage(string $html): string {
+    $cleanupScript = <<<HTML
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    // 1. إزالة البلوك عبر البحث عن نماذج الإضافة والتصفير داخل صفحة /ai-whatsapp
+    const duplicateSelectors = [
+        'form[action*="whitelist"]',
+        'form[action*="quotas/reset"]'
+    ];
+
+    duplicateSelectors.forEach(function (sel) {
+        document.querySelectorAll(sel).forEach(function (formEl) {
+            let card = formEl.closest('.bg-white') || formEl.parentElement;
+            if (card) {
+                const parentGrid = card.parentElement;
+                card.remove();
+                if (parentGrid && parentGrid.children.length === 0) {
+                    parentGrid.remove();
+                }
+            }
+        });
+    });
+
+    // 2. تأكيد إضافي عبر البحث عن عناوين البطاقتين وحذف الحاوية الخاصة بهما
+    document.querySelectorAll('h2, h3, h4, div, span').forEach(function (el) {
+        const txt = (el.textContent || '').trim();
+        if (txt === '⭐ الأرقام المستثناة (استعلام دائم)' || txt === 'الأرقام المستثناة (استعلام دائم)' ||
+            txt === '📊 استهلاك استعلامات العملاء' || txt === 'استهلاك استعلامات العملاء') {
+            let box = el.closest('.bg-white') || el.closest('.rounded-xl') || el.closest('.rounded-2xl') || el.closest('.shadow') || el.closest('.shadow-sm');
+            if (box && !box.querySelector('form[action*="ai-whatsapp/settings"]')) {
+                const parentGrid = box.parentElement;
+                box.remove();
+                if (parentGrid && parentGrid.children.length === 0) {
+                    parentGrid.remove();
+                }
+            }
+        }
+    });
+});
+</script>
+HTML;
+
+    if (str_contains($html, '</body>')) {
+        return str_replace('</body>', $cleanupScript . "\n</body>", $html);
+    }
+    return $html . $cleanupScript;
 }
 
 /**
@@ -2065,8 +2641,8 @@ function renderStandalonePageInsideMainLayout(string $pageTitle, string $innerHt
         'customerQuotas'  => collect(),
     ])->render();
 
-    $payloadJson  = json_encode($innerHtmlContent, JSON_UNESCAPED_UNICODE);
-    $titleJson    = json_encode($pageTitle, JSON_UNESCAPED_UNICODE);
+    $payloadJson = json_encode($innerHtmlContent, JSON_UNESCAPED_UNICODE);
+    $titleJson   = json_encode($pageTitle, JSON_UNESCAPED_UNICODE);
 
     $replaceScript = <<<HTML
 <style id="epc-hide-until-ready">
@@ -2092,6 +2668,14 @@ document.addEventListener('DOMContentLoaded', function () {
     if (container) {
         container.innerHTML = customHtml;
         container.style.opacity = '1';
+
+        // تشغيل جميع أكواد الـ Script الموجودة داخل الصفحة المستقلة لتعمل نافذة السجل والفلترة الحية
+        container.querySelectorAll('script').forEach(function (oldScript) {
+            const newScript = document.createElement('script');
+            Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+            newScript.textContent = oldScript.textContent;
+            oldScript.parentNode.replaceChild(newScript, oldScript);
+        });
     }
 
     const hideStyle = document.getElementById('epc-hide-until-ready');
@@ -2820,7 +3404,7 @@ Route::middleware('auth')->group(function () {
         return response(injectSidebarNavigationLinks($rendered));
     })->name('master.item.details');
 
-    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) - نظيفة تماماً وبدون أي تداخل
+    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) - نظيفة تماماً وبدون البطاقتين المكررتين في الأسفل
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId          = auth()->id();
         $customerMessage = (string) $request->query('message', '');
@@ -2857,25 +3441,15 @@ Route::middleware('auth')->group(function () {
             }
         }
 
-        $whitelistPhones = DB::table('whatsapp_whitelist_phones')
-            ->where('user_id', $userId)
-            ->latest()
-            ->get();
-
-        $customerQuotas = DB::table('whatsapp_customer_quotas')
-            ->where('user_id', $userId)
-            ->orderByDesc('updated_at')
-            ->take(20)
-            ->get();
-
         $rendered = view('pages.second', [
             'customerMessage' => $customerMessage,
             'matchedItems'    => $matchedItems,
             'botSettings'     => $botSettings,
-            'whitelistPhones' => $whitelistPhones,
-            'customerQuotas'  => $customerQuotas,
+            'whitelistPhones' => collect(),
+            'customerQuotas'  => collect(),
         ])->render();
 
+        $rendered = stripDuplicateQuotaCardsFromSecondPage($rendered);
         return response(injectSidebarNavigationLinks($rendered));
     })->name('pages.second');
 
@@ -2911,8 +3485,8 @@ Route::middleware('auth')->group(function () {
         $whitelistRowsHtml = '';
         foreach ($whitelistPhones as $w) {
             $quotaBadge = (!empty($w->custom_quota) && (int) $w->custom_quota > 0)
-                ? "<span style='background:#dbeafe;color:#1e40af;padding:3px 10px;border-radius:6px;font-size:12px;font-weight:700;'>محدد ({$w->custom_quota} رقم)</span>"
-                : "<span style='background:#dcfce7;color:#166534;padding:3px 10px;border-radius:6px;font-size:12px;font-weight:700;'>مفتوح بلا حد</span>";
+                ? "<span style='background:#eff6ff;color:#1e40af;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>محدد ({$w->custom_quota} رقم)</span>"
+                : "<span style='background:#f0fdf4;color:#166534;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>مفتوح بلا حد</span>";
 
             $timeWindow = (!empty($w->allowed_start_time) && !empty($w->allowed_end_time))
                 ? "⏰ {$w->allowed_start_time} إلى {$w->allowed_end_time}"
@@ -2923,30 +3497,30 @@ Route::middleware('auth')->group(function () {
             if ($w->allow_unavailable ?? true) $perms[] = "❌ غير المتوفر";
             if ($w->allow_prices ?? true)      $perms[] = "💰 الأسعار";
             if ($w->allow_quantities ?? true)  $perms[] = "📦 الكميات";
-            if ($w->allow_excel ?? true)       $perms[] = "📊 ملفات إكسل";
+            if ($w->allow_excel ?? true)       $perms[] = "📊 إكسل";
             $permsStr = implode(' | ', $perms);
 
             $delUrl    = route('pages.second.whitelist.delete', $w->id);
             $labelSafe = htmlspecialchars((string) ($w->label ?? 'بدون اسم'), ENT_QUOTES, 'UTF-8');
 
-            $whitelistRowsHtml .= "
-            <tr style='border-bottom:1px solid #e2e8f0;'>
-                <td style='padding:12px;font-weight:700;font-family:monospace;font-size:14px;'>{$w->phone}</td>
-                <td style='padding:12px;font-weight:600;'>{$labelSafe}</td>
-                <td style='padding:12px;'>{$quotaBadge}</td>
-                <td style='padding:12px;font-size:13px;'>{$timeWindow}</td>
-                <td style='padding:12px;font-size:12px;color:#334155;'>{$permsStr}</td>
-                <td style='padding:12px;'>
+            $whitelistRowsHtml += "
+            <tr style='border-bottom:1px solid #f1f5f9;transition:background 0.15s;' onmouseover=\"this.style.background='#f8fafc'\" onmouseout=\"this.style.background='transparent'\">
+                <td style='padding:14px;font-weight:700;font-family:monospace;font-size:14px;color:#0f172a;'>{$w->phone}</td>
+                <td style='padding:14px;font-weight:600;color:#334155;'>{$labelSafe}</td>
+                <td style='padding:14px;'>{$quotaBadge}</td>
+                <td style='padding:14px;font-size:13px;color:#475569;'>{$timeWindow}</td>
+                <td style='padding:14px;font-size:12px;color:#475569;'>{$permsStr}</td>
+                <td style='padding:14px;'>
                     <form method='POST' action='{$delUrl}' style='display:inline;'>
                         <input type='hidden' name='_token' value='{$csrfToken}'>
                         <input type='hidden' name='_method' value='DELETE'>
-                        <button type='submit' style='background:#ef4444;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>حذف</button>
+                        <button type='submit' style='background:#fee2e2;color:#991b1b;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>حذف</button>
                     </form>
                 </td>
             </tr>";
         }
         if ($whitelistRowsHtml === '') {
-            $whitelistRowsHtml = "<tr><td colspan='6' style='padding:18px;text-align:center;color:#64748b;'>لا توجد أرقام مضافة في قائمة الاستثناء حالياً.</td></tr>";
+            $whitelistRowsHtml = "<tr><td colspan='6' style='padding:24px;text-align:center;color:#64748b;'>لا توجد أرقام مضافة في قائمة الاستثناء حالياً.</td></tr>";
         }
 
         $blacklistRowsHtml = '';
@@ -2954,42 +3528,42 @@ Route::middleware('auth')->group(function () {
             $delBUrl    = route('pages.second.blacklist.delete', $b->id);
             $reasonSafe = htmlspecialchars((string) ($b->reason ?? 'بدون سبب'), ENT_QUOTES, 'UTF-8');
             $blacklistRowsHtml .= "
-            <tr style='border-bottom:1px solid #e2e8f0;'>
-                <td style='padding:10px;font-weight:700;color:#b91c1c;font-family:monospace;'>{$b->phone}</td>
-                <td style='padding:10px;'>{$reasonSafe}</td>
-                <td style='padding:10px;font-size:12px;color:#64748b;direction:ltr;'>{$b->created_at}</td>
-                <td style='padding:10px;'>
+            <tr style='border-bottom:1px solid #f1f5f9;'>
+                <td style='padding:12px;font-weight:700;color:#b91c1c;font-family:monospace;'>{$b->phone}</td>
+                <td style='padding:12px;color:#334155;'>{$reasonSafe}</td>
+                <td style='padding:12px;font-size:12px;color:#64748b;direction:ltr;'>{$b->created_at}</td>
+                <td style='padding:12px;'>
                     <form method='POST' action='{$delBUrl}' style='display:inline;'>
                         <input type='hidden' name='_token' value='{$csrfToken}'>
                         <input type='hidden' name='_method' value='DELETE'>
-                        <button type='submit' style='background:#475569;color:#fff;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;'>إلغاء الحظر</button>
+                        <button type='submit' style='background:#f1f5f9;color:#475569;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;'>إلغاء الحظر</button>
                     </form>
                 </td>
             </tr>";
         }
         if ($blacklistRowsHtml === '') {
-            $blacklistRowsHtml = "<tr><td colspan='4' style='padding:16px;text-align:center;color:#64748b;'>لا توجد أرقام محظورة في القائمة السوداء.</td></tr>";
+            $blacklistRowsHtml = "<tr><td colspan='4' style='padding:20px;text-align:center;color:#64748b;'>لا توجد أرقام محظورة في القائمة السوداء.</td></tr>";
         }
 
         $quotaRowsHtml = '';
         $resetUrl = route('pages.second.quotas.reset');
         foreach ($customerQuotas as $q) {
             $quotaRowsHtml .= "
-            <tr style='border-bottom:1px solid #e2e8f0;'>
-                <td style='padding:10px;font-weight:700;font-family:monospace;'>{$q->phone}</td>
-                <td style='padding:10px;font-weight:700;color:#1d4ed8;'>{$q->queries_count} رقم صنف</td>
-                <td style='padding:10px;font-size:12px;color:#64748b;direction:ltr;'>{$q->updated_at}</td>
-                <td style='padding:10px;'>
+            <tr style='border-bottom:1px solid #f1f5f9;'>
+                <td style='padding:12px;font-weight:700;font-family:monospace;color:#0f172a;'>{$q->phone}</td>
+                <td style='padding:12px;font-weight:700;color:#2563eb;'>{$q->queries_count} رقم صنف</td>
+                <td style='padding:12px;font-size:12px;color:#64748b;direction:ltr;'>{$q->updated_at}</td>
+                <td style='padding:12px;'>
                     <form method='POST' action='{$resetUrl}' style='display:inline;'>
                         <input type='hidden' name='_token' value='{$csrfToken}'>
                         <input type='hidden' name='quota_id' value='{$q->id}'>
-                        <button type='submit' style='background:#0284c7;color:#fff;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;'>تصفير هذا الرقم</button>
+                        <button type='submit' style='background:#e0f2fe;color:#0369a1;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>تصفير الرقم</button>
                     </form>
                 </td>
             </tr>";
         }
         if ($quotaRowsHtml === '') {
-            $quotaRowsHtml = "<tr><td colspan='4' style='padding:16px;text-align:center;color:#64748b;'>لا توجد استعلامات مسجلة في العداد حالياً.</td></tr>";
+            $quotaRowsHtml = "<tr><td colspan='4' style='padding:20px;text-align:center;color:#64748b;'>لا توجد استعلامات مسجلة في العداد حالياً.</td></tr>";
         }
 
         $settingsActionUrl  = route('pages.second.settings');
@@ -2997,101 +3571,91 @@ Route::middleware('auth')->group(function () {
         $blacklistActionUrl = route('pages.second.blacklist.add');
 
         $contentHtml = <<<HTML
-        <div style="padding:24px;max-width:1300px;margin:0 auto;direction:rtl;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
-                <div>
-                    <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;">🛡️ إدارة الاستثناءات والحصص والتصفير التلقائي</h1>
-                    <p style="margin:6px 0 0 0;font-size:14px;color:#64748b;">تحكم كامل في الحد العام، التصفير اليومي/الشهري، صلاحيات المستثنين الدقيقة، والقائمة السوداء.</p>
-                </div>
+        <div style="padding:28px;max-width:1300px;margin:0 auto;direction:rtl;font-family:inherit;background:#f8fafc;min-height:100vh;">
+            <!-- رأس الصفحة -->
+            <div style="background:linear-gradient(135deg, #0f172a 0%, #1e293b 100%);color:#fff;padding:24px 28px;border-radius:16px;margin-bottom:24px;box-shadow:0 4px 12px rgba(15,23,42,0.08);">
+                <h1 style="margin:0;font-size:22px;font-weight:800;display:flex;align-items:center;gap:10px;">🛡️ إدارة الاستثناءات والحصص والتصفير التلقائي</h1>
+                <p style="margin:8px 0 0 0;font-size:13px;color:#94a3b8;line-height:1.5;">تحكم احترافي في الحد العام للاستعلامات، دورات التصفير التلقائي، الصلاحيات المخصصة للأرقام، وإدارة القائمة السوداء.</p>
             </div>
 
             <!-- 1. التصفير التلقائي والحد العام -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:22px;margin-bottom:24px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
-                <h3 style="margin:0 0 10px 0;font-size:18px;color:#0f172a;">🔄 نظام الحصة العام والتصفير التلقائي (كل رقم صنف = 1 استعلام)</h3>
-                <p style="margin:0 0 16px 0;font-size:13px;color:#475569;">
-                    💡 إذا كان الحد العام مثلاً <b>5</b> وأرسل العميل <b>5 أرقام أصناف</b> في رسالة واحدة، تُحتسب <b>5 استعلامات</b> (لأن كل رقم صنف يُحتسب بـ 1).
-                </p>
-                <form method="POST" action="{$settingsActionUrl}" style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;">
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
+                <h3 style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:8px;">🔄 نظام الحصة العام والتصفير التلقائي</h3>
+                <p style="margin:0 0 18px 0;font-size:13px;color:#64748b;">كل رقم صنف يتم الاستعلام عنه يُحتسب كاستعلام واحد مستقل.</p>
+                
+                <form method="POST" action="{$settingsActionUrl}" style="display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end;">
                     <input type="hidden" name="_token" value="{$csrfToken}">
-                    <div>
-                        <label style="display:block;font-size:13px;font-weight:700;color:#1e293b;margin-bottom:6px;">الحد العام للاستعلام لكل رقم (0 = مفتوح):</label>
-                        <input type="number" name="max_queries_per_phone" min="0" value="{$maxLimit}" style="padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;width:220px;">
+                    <div style="flex:1;min-width:240px;">
+                        <label style="display:block;font-size:13px;font-weight:700;color:#334155;margin-bottom:6px;">الحد العام للاستعلام لكل رقم (0 = مفتوح):</label>
+                        <input type="number" name="max_queries_per_phone" min="0" value="{$maxLimit}" style="width:100%;padding:10px 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;background:#f8fafc;">
                     </div>
-                    <div>
-                        <label style="display:block;font-size:13px;font-weight:700;color:#1e293b;margin-bottom:6px;">دورة التصفير التلقائي لعداد الاستعلامات:</label>
-                        <select name="quota_reset_period" style="padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;background:#f8fafc;min-width:260px;">
+                    <div style="flex:1;min-width:260px;">
+                        <label style="display:block;font-size:13px;font-weight:700;color:#334155;margin-bottom:6px;">دورة التصفير التلقائي لعداد الاستعلامات:</label>
+                        <select name="quota_reset_period" style="width:100%;padding:10px 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;background:#f8fafc;">
                             <option value="manual" {$selManual}>يدوي فقط (من زر تصفير العداد)</option>
                             <option value="daily" {$selDaily}>تلقائي يومياً (كل 24 ساعة)</option>
                             <option value="monthly" {$selMonthly}>تلقائي بداية كل شهر</option>
                         </select>
                     </div>
-                    <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:10px 22px;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px;">
-                        💾 حفظ إعدادات الحد والتصفير
+                    <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:11px 24px;border-radius:10px;font-weight:700;cursor:pointer;font-size:14px;box-shadow:0 2px 6px rgba(37,99,235,0.2);">
+                        💾 حفظ الإعدادات
                     </button>
                 </form>
             </div>
 
             <!-- 2. نظام الاستثناءات المتقدم -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:22px;margin-bottom:24px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
-                <h3 style="margin:0 0 14px 0;font-size:18px;color:#0f172a;">🌟 قائمة الاستثناء المتقدمة (صلاحيات مخصصة + أوقات معينة + دعم الإكسل)</h3>
-                <form method="POST" action="{$whitelistActionUrl}" style="background:#f8fafc;padding:18px;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:20px;">
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
+                <h3 style="margin:0 0 16px 0;font-size:16px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:8px;">🌟 إضافة رقم لقائمة الاستثناء المتقدمة</h3>
+                
+                <form method="POST" action="{$whitelistActionUrl}" style="background:#f8fafc;padding:20px;border-radius:14px;border:1px solid #e2e8f0;margin-bottom:20px;">
                     <input type="hidden" name="_token" value="{$csrfToken}">
-                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px;">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-bottom:18px;">
                         <div>
-                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">رقم الجوال *</label>
-                            <input type="text" name="phone" required placeholder="05XXXXXXXX" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">رقم الجوال *</label>
+                            <input type="text" name="phone" required placeholder="05XXXXXXXX" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">اسم العميل / الوصف</label>
-                            <input type="text" name="label" placeholder="مثال: ورشة النخبة" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">اسم العميل / الوصف</label>
+                            <input type="text" name="label" placeholder="مثال: ورشة النخبة" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">عدد مرات الاستعلام (0 = مفتوح)</label>
-                            <input type="number" name="custom_quota" min="0" value="0" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">عدد مرات الاستعلام (0 = مفتوح)</label>
+                            <input type="number" name="custom_quota" min="0" value="0" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">من الساعة (اختياري)</label>
-                            <input type="time" name="allowed_start_time" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">من الساعة (اختياري)</label>
+                            <input type="time" name="allowed_start_time" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">إلى الساعة (اختياري)</label>
-                            <input type="time" name="allowed_end_time" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">إلى الساعة (اختياري)</label>
+                            <input type="time" name="allowed_end_time" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                     </div>
 
-                    <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding-top:12px;border-top:1px dashed #cbd5e1;">
-                        <span style="font-size:13px;font-weight:700;color:#1e293b;">صلاحيات الرد المسموحة لهذا العميل:</span>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                            <input type="checkbox" name="allow_available" value="1" checked> ✅ إظهار المتوفر
-                        </label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                            <input type="checkbox" name="allow_unavailable" value="1" checked> ❌ إظهار غير المتوفر
-                        </label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                            <input type="checkbox" name="allow_prices" value="1" checked> 💰 إظهار الأسعار
-                        </label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                            <input type="checkbox" name="allow_quantities" value="1" checked> 📦 إظهار الكميات المتوفرة
-                        </label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                            <input type="checkbox" name="allow_excel" value="1" checked> 📊 السماح بالاستعلام عبر ملف Excel
-                        </label>
-                        <button type="submit" style="margin-right:auto;background:#16a34a;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-weight:700;cursor:pointer;">
-                            + حفظ / تحديث الرقم المستثنى
+                    <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center;padding-top:14px;border-top:1px dashed #cbd5e1;">
+                        <span style="font-size:13px;font-weight:700;color:#1e293b;">صلاحيات الرد المسموحة:</span>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_available" value="1" checked> ✅ المتوفر</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_unavailable" value="1" checked> ❌ غير المتوفر</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_prices" value="1" checked> 💰 الأسعار</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_quantities" value="1" checked> 📦 الكميات</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_excel" value="1" checked> 📊 ملفات إكسل</label>
+                        
+                        <button type="submit" style="margin-right:auto;background:#16a34a;color:#fff;border:none;padding:11px 24px;border-radius:10px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(22,163,74,0.2);">
+                            + حفظ الرقم المستثنى
                         </button>
                     </div>
                 </form>
 
-                <div style="overflow-x:auto;">
+                <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:12px;">
                     <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
                         <thead>
                             <tr style="background:#f1f5f9;color:#334155;">
-                                <th style="padding:12px;">رقم الجوال</th>
-                                <th style="padding:12px;">الاسم / الوصف</th>
-                                <th style="padding:12px;">حد الاستعلام</th>
-                                <th style="padding:12px;">الأوقات المسموحة</th>
-                                <th style="padding:12px;">الصلاحيات المفعلة</th>
-                                <th style="padding:12px;">إجراء</th>
+                                <th style="padding:14px;">رقم الجوال</th>
+                                <th style="padding:14px;">الاسم / الوصف</th>
+                                <th style="padding:14px;">حد الاستعلام</th>
+                                <th style="padding:14px;">الأوقات المسموحة</th>
+                                <th style="padding:14px;">الصلاحيات المفعلة</th>
+                                <th style="padding:14px;">إجراء</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -3102,24 +3666,24 @@ Route::middleware('auth')->group(function () {
             </div>
 
             <!-- 3. القائمة السوداء (Blacklist) -->
-            <div style="background:#ffffff;border:1px solid #fee2e2;border-radius:14px;padding:22px;margin-bottom:24px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
-                <h3 style="margin:0 0 12px 0;font-size:18px;color:#991b1b;">🚫 القائمة السوداء (Blacklist) - حظر الأرقام من الاستعلام نهائياً</h3>
+            <div style="background:#ffffff;border:1px solid #fee2e2;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
+                <h3 style="margin:0 0 14px 0;font-size:16px;font-weight:700;color:#991b1b;display:flex;align-items:center;gap:8px;">🚫 القائمة السوداء (حظر الأرقام)</h3>
                 <form method="POST" action="{$blacklistActionUrl}" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
                     <input type="hidden" name="_token" value="{$csrfToken}">
-                    <input type="text" name="phone" required placeholder="رقم الجوال المراد حظره (05XXXXXXXX)" style="flex:1;min-width:220px;padding:9px 14px;border:1px solid #fca5a5;border-radius:8px;">
-                    <input type="text" name="reason" placeholder="سبب الحظر (اختياري)" style="flex:1;min-width:220px;padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;">
-                    <button type="submit" style="background:#dc2626;color:#fff;border:none;padding:9px 20px;border-radius:8px;font-weight:700;cursor:pointer;">
-                        حظر الرقم فوراً
+                    <input type="text" name="phone" required placeholder="رقم الجوال (05XXXXXXXX)" style="flex:1;min-width:220px;padding:10px 14px;border:1px solid #fca5a5;border-radius:10px;background:#fff;">
+                    <input type="text" name="reason" placeholder="سبب الحظر (اختياري)" style="flex:1;min-width:220px;padding:10px 14px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                    <button type="submit" style="background:#dc2626;color:#fff;border:none;padding:10px 22px;border-radius:10px;font-weight:700;cursor:pointer;">
+                        حظر الرقم
                     </button>
                 </form>
-                <div style="overflow-x:auto;">
+                <div style="overflow-x:auto;border:1px solid #fee2e2;border-radius:12px;">
                     <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
                         <thead>
                             <tr style="background:#fef2f2;color:#991b1b;">
-                                <th style="padding:10px;">الرقم المحظور</th>
-                                <th style="padding:10px;">السبب</th>
-                                <th style="padding:10px;">تاريخ الحظر</th>
-                                <th style="padding:10px;">إجراء</th>
+                                <th style="padding:12px;">الرقم المحظور</th>
+                                <th style="padding:12px;">السبب</th>
+                                <th style="padding:12px;">تاريخ الحظر</th>
+                                <th style="padding:12px;">إجراء</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -3130,24 +3694,24 @@ Route::middleware('auth')->group(function () {
             </div>
 
             <!-- 4. سجل عداد الاستعلامات الحالي للعملاء -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:22px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-                    <h3 style="margin:0;font-size:18px;color:#0f172a;">📊 عداد استهلاك الأرقام وحصص العملاء</h3>
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <h3 style="margin:0;font-size:16px;font-weight:700;color:#0f172a;">📊 عداد استهلاك الأرقام وحصص العملاء</h3>
                     <form method="POST" action="{$resetUrl}" onsubmit="return confirm('هل تريد تصفير العداد لجميع الأرقام؟');">
                         <input type="hidden" name="_token" value="{$csrfToken}">
-                        <button type="submit" style="background:#dc2626;color:#fff;border:none;padding:8px 16px;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;">
+                        <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:8px 16px;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;">
                             🔄 تصفير جميع العدادات
                         </button>
                     </form>
                 </div>
-                <div style="overflow-x:auto;">
+                <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:12px;">
                     <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
                         <thead>
                             <tr style="background:#f1f5f9;color:#334155;">
-                                <th style="padding:10px;">رقم الجوال</th>
-                                <th style="padding:10px;">الأرقام المستهلكة</th>
-                                <th style="padding:10px;">آخر استعلام</th>
-                                <th style="padding:10px;">إجراء</th>
+                                <th style="padding:12px;">رقم الجوال</th>
+                                <th style="padding:12px;">الأرقام المستهلكة</th>
+                                <th style="padding:12px;">آخر استعلام</th>
+                                <th style="padding:12px;">إجراء</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -3163,16 +3727,29 @@ HTML;
     })->name('whatsapp.quotas.page');
 
     // 7. صفحة مستقلة تماماً خاصة بالأدمن فقط: رادار الطلبات العام الموحد (/admin-radar)
+    // حذف صنف محدد من سجل الرادار
+    Route::delete('/admin-radar/item/{normKey}', function (string $normKey) {
+        if (auth()->user()->role !== 'admin') {
+            abort(403);
+        }
+
+        $cleanKey = normalizePartNumberClean($normKey);
+        DB::table('whatsapp_inquiry_logs')
+            ->where('normalized_part', $cleanKey)
+            ->orWhere(DB::raw("UPPER(REPLACE(REPLACE(part_number, '-', ''), ' ', ''))"), $cleanKey)
+            ->delete();
+
+        return back()->with('success', "تم حذف الصنف ({$cleanKey}) من سجل الأصناف المطلوبة بنجاح.");
+    })->name('admin.radar.delete_item');
+
+    // 7. صفحة مستقلة تماماً خاصة بالأدمن فقط: رادار الطلبات العام الموحد (/admin-radar)
     Route::get('/admin-radar', function (Request $request) {
         if (auth()->user()->role !== 'admin') {
             abort(403);
         }
 
-        $csrfToken    = csrf_token();
-        $search       = trim((string) $request->query('search', ''));
-        $statusFilter = trim((string) $request->query('status', 'all'));
+        $csrfToken = csrf_token();
 
-        // جلب جميع سجلات الاستعلام من جميع العملاء والمتاجر في النظام وتجميعها برقم الصنف الموحد بدون تكرار
         $allLogs = DB::table('whatsapp_inquiry_logs')
             ->leftJoin('users', 'whatsapp_inquiry_logs.user_id', '=', 'users.id')
             ->select(
@@ -3197,13 +3774,13 @@ HTML;
                     'normalized_part' => $normKey,
                     'part_number'     => $log->part_number,
                     'item_name'       => $log->item_name ?: null,
-                    'unique_days_map' => [], // لحساب عدد الأيام الفريدة (بحد أقصى 1 لكل يوم)
-                    'detailed_count'  => 0,  // لحساب العدد التفصيلي الشامل حتى لو تكرر في نفس اليوم
+                    'unique_days_map' => [],
+                    'detailed_count'  => 0,
                     'avail_count'     => 0,
                     'unavail_count'   => 0,
                     'total_req_qty'   => 0,
                     'last_status'     => $log->status,
-                    'last_date'       => $log->created_at,
+                    'last_date'       => (string) $log->created_at,
                     'details_list'    => [],
                 ];
             }
@@ -3212,10 +3789,7 @@ HTML;
                 $groupedRadar[$normKey]['item_name'] = $log->item_name;
             }
 
-            // 1. العمود الأول: يحتسب 1 فقط لكل يوم (لا يزيد عن 1 إذا تكرر الطلب في نفس اليوم)
             $groupedRadar[$normKey]['unique_days_map'][$dayStr] = true;
-
-            // 2. العمود الثاني (التفصيلي): يحتسب +1 في كل مرة يتم تسعيرها أو طلبها حتى لو مكررة بنفس اليوم
             $groupedRadar[$normKey]['detailed_count']++;
 
             if ($log->status === 'available') {
@@ -3224,45 +3798,25 @@ HTML;
                 $groupedRadar[$normKey]['unavail_count']++;
             }
 
-            $groupedRadar[$normKey]['total_req_qty'] += (int) $log->requested_qty;
+            $groupedRadar[$normKey]['total_req_qty'] += max(1, (int) $log->requested_qty);
 
-            if (count($groupedRadar[$normKey]['details_list']) < 50) {
-                $groupedRadar[$normKey]['details_list'][] = [
-                    'date'          => (string) $log->created_at,
-                    'day'           => $dayStr,
-                    'customer'      => (string) $log->phone,
-                    'merchant'      => (string) $log->merchant_name,
-                    'status'        => (string) $log->status,
-                    'req_qty'       => (int) $log->requested_qty,
-                    'avail_qty'     => (int) $log->available_qty,
-                    'price'         => $log->price !== null ? number_format((float) $log->price, 2) : '—',
-                    'source'        => $log->source === 'excel' ? 'ملف إكسل' : 'رسالة واتساب',
-                ];
-            }
+            // حفظ جميع مرات الطلب بالكامل للتصدير التفصيلي وعرض السجل
+            $groupedRadar[$normKey]['details_list'][] = [
+                'date'      => (string) $log->created_at,
+                'day'       => $dayStr,
+                'customer'  => (string) $log->phone,
+                'merchant'  => (string) $log->merchant_name,
+                'status'    => (string) $log->status,
+                'req_qty'   => max(1, (int) $log->requested_qty),
+                'avail_qty' => (int) $log->available_qty,
+                'price'     => $log->price !== null ? number_format((float) $log->price, 2) : '—',
+                'source'    => $log->source === 'excel' ? 'ملف إكسل' : 'رسالة واتساب',
+            ];
         }
 
-        // فلترة البحث والحالة
-        $cleanSearchNoDash = normalizePartNumberClean($search);
-        $filteredItems = array_filter($groupedRadar, function ($row) use ($search, $cleanSearchNoDash, $statusFilter) {
-            if ($statusFilter === 'available' && $row['avail_count'] === 0) {
-                return false;
-            }
-            if ($statusFilter === 'unavailable' && $row['unavail_count'] === 0) {
-                return false;
-            }
-            if ($search !== '') {
-                $matchPart = str_contains(strtoupper($row['part_number']), strtoupper($search))
-                          || ($cleanSearchNoDash !== '' && str_contains($row['normalized_part'], $cleanSearchNoDash));
-                $matchName = !empty($row['item_name']) && str_contains($row['item_name'], $search);
-                if (!$matchPart && !$matchName) {
-                    return false;
-                }
-            }
-            return true;
-        });
-
-        // ترتيب حسب الأكثر طلباً
-        usort($filteredItems, function ($a, $b) {
+        // ترتيب افتراضي حسب الأكثر طلباً باليوم ثم التكرار
+        $itemsList = array_values($groupedRadar);
+        usort($itemsList, function ($a, $b) {
             $daysA = count($a['unique_days_map']);
             $daysB = count($b['unique_days_map']);
             if ($daysA !== $daysB) {
@@ -3271,131 +3825,227 @@ HTML;
             return $b['detailed_count'] <=> $a['detailed_count'];
         });
 
-        $totalUniqueParts   = count($groupedRadar);
-        $totalDetailedCalls = count($allLogs);
+        $totalUniqueParts    = count($itemsList);
+        $totalAvailParts     = 0;
+        $totalMissingParts   = 0;
+        $totalRequestedUnits = 0;
 
-        $radarRowsHtml = '';
+        $radarRowsHtml   = '';
         $detailsMapForJs = [];
 
-        foreach ($filteredItems as $idx => $item) {
+        foreach ($itemsList as $item) {
             $uniqueDaysCount = count($item['unique_days_map']);
-            $detailedCount   = $item['detailed_count'];
+            $detailedCount   = (int) $item['detailed_count'];
+            $totalReqQty     = (int) $item['total_req_qty'];
+            $availCount      = (int) $item['avail_count'];
+            $unavailCount    = (int) $item['unavail_count'];
             $partKey         = $item['normalized_part'];
+
+            $totalRequestedUnits += $totalReqQty;
+            if ($unavailCount > 0 && $availCount === 0) {
+                $totalMissingParts++;
+                $rowStatusType = 'unavailable';
+            } elseif ($availCount > 0 && $unavailCount === 0) {
+                $totalAvailParts++;
+                $rowStatusType = 'available';
+            } else {
+                $totalMissingParts++;
+                $rowStatusType = 'mixed';
+            }
+
             $detailsMapForJs[$partKey] = [
                 'part_number'    => $item['part_number'],
                 'item_name'      => $item['item_name'] ?: 'غير مسجل في المخزون',
                 'unique_days'    => $uniqueDaysCount,
                 'detailed_count' => $detailedCount,
+                'total_req_qty'  => $totalReqQty,
                 'records'        => $item['details_list'],
             ];
 
-            $nameDisplay = htmlspecialchars((string) ($item['item_name'] ?: '— غير مسجل في المخزون —'), ENT_QUOTES, 'UTF-8');
+            $nameRaw     = $item['item_name'] ?: '— غير مسجل في المخزون —';
+            $nameDisplay = htmlspecialchars((string) $nameRaw, ENT_QUOTES, 'UTF-8');
             $partDisplay = htmlspecialchars((string) $item['part_number'], ENT_QUOTES, 'UTF-8');
+            $searchAttr  = htmlspecialchars(strtolower($item['part_number'] . ' ' . $partKey . ' ' . $nameRaw), ENT_QUOTES, 'UTF-8');
+            $deleteUrl   = route('admin.radar.delete_item', $partKey);
 
-            if ($item['avail_count'] > 0 && $item['unavail_count'] > 0) {
-                $statusHtml = "<span style='background:#dcfce7;color:#166534;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700;'>متوفر ({$item['avail_count']})</span>
-                               <span style='background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700;margin-right:4px;'>غير متوفر ({$item['unavail_count']})</span>";
-            } elseif ($item['avail_count'] > 0) {
-                $statusHtml = "<span style='background:#dcfce7;color:#166534;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>✅ متوفر ({$item['avail_count']})</span>";
+            if ($availCount > 0 && $unavailCount > 0) {
+                $statusHtml = "<div style='display:flex;flex-wrap:wrap;gap:4px;'>
+                    <span style='background:#dcfce7;color:#166534;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:700;'>✅ متوفر ({$availCount})</span>
+                    <span style='background:#fee2e2;color:#991b1b;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:700;'>❌ ناقص ({$unavailCount})</span>
+                </div>";
+                $statusTextForExcel = "متوفر ({$availCount}) / غير متوفر ({$unavailCount})";
+            } elseif ($availCount > 0) {
+                $statusHtml = "<span style='background:#dcfce7;color:#166534;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:700;display:inline-block;'>✅ متوفر ({$availCount})</span>";
+                $statusTextForExcel = "متوفر ({$availCount})";
             } else {
-                $statusHtml = "<span style='background:#fee2e2;color:#991b1b;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>❌ غير متوفر ({$item['unavail_count']})</span>";
+                $statusHtml = "<span style='background:#fee2e2;color:#991b1b;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:700;display:inline-block;'>❌ غير متوفر ({$unavailCount})</span>";
+                $statusTextForExcel = "غير متوفر ({$unavailCount})";
             }
 
+            $statusExcelSafe = htmlspecialchars($statusTextForExcel, ENT_QUOTES, 'UTF-8');
+
             $radarRowsHtml .= "
-            <tr style='border-bottom:1px solid #e2e8f0;transition:background 0.15s;' onmouseover=\"this.style.background='#f8fafc'\" onmouseout=\"this.style.background='transparent'\">
-                <td style='padding:12px;font-weight:800;font-family:monospace;font-size:15px;color:#0f172a;'>{$partDisplay}</td>
-                <td style='padding:12px;font-weight:600;color:#334155;'>{$nameDisplay}</td>
-                <td style='padding:12px;'>{$statusHtml}</td>
-                <td style='padding:12px;text-align:center;'>
+            <tr class='epc-radar-row'
+                data-part-key='{$partKey}'
+                data-search='{$searchAttr}'
+                data-part='{$partDisplay}'
+                data-name='{$nameDisplay}'
+                data-status-type='{$rowStatusType}'
+                data-status-text='{$statusExcelSafe}'
+                data-days='{$uniqueDaysCount}'
+                data-detailed='{$detailedCount}'
+                data-qty='{$totalReqQty}'
+                data-unavail='{$unavailCount}'
+                data-date='{$item['last_date']}'
+                style='border-bottom:1px solid #f1f5f9;transition:background 0.15s;'
+                onmouseover=\"this.style.background='#f8fafc'\"
+                onmouseout=\"this.style.background='transparent'\">
+                <td style='padding:14px 12px;font-weight:800;font-family:monospace;font-size:15px;color:#0f172a;'>{$partDisplay}</td>
+                <td style='padding:14px 12px;font-weight:600;color:#334155;'>{$nameDisplay}</td>
+                <td style='padding:14px 12px;'>{$statusHtml}</td>
+                <td style='padding:14px 12px;text-align:center;'>
+                    <span style='background:#fef3c7;color:#92400e;border:1px solid #fde68a;padding:5px 14px;border-radius:999px;font-size:14px;font-weight:800;display:inline-block;'>
+                        {$totalReqQty} حبة
+                    </span>
+                </td>
+                <td style='padding:14px 12px;text-align:center;'>
                     <span style='background:#dbeafe;color:#1e40af;padding:5px 14px;border-radius:999px;font-size:14px;font-weight:800;display:inline-block;'>
                         {$uniqueDaysCount}
                     </span>
-                    <div style='font-size:11px;color:#64748b;margin-top:3px;'>بحد أقصى 1 باليوم</div>
                 </td>
-                <td style='padding:12px;text-align:center;'>
-                    <div style='display:flex;align-items:center;justify-content:center;gap:8px;'>
-                        <span style='background:#f3e8ff;color:#6b21a8;padding:5px 14px;border-radius:999px;font-size:14px;font-weight:800;'>
-                            {$detailedCount}
-                        </span>
-                        <button type='button' onclick=\"openRadarDetailsModal('{$partKey}')\" style='background:#0f172a;color:#ffffff;border:none;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;'>
-                            🔍 السجل التفصيلي بالتواريخ
+                <td style='padding:14px 12px;text-align:center;'>
+                    <span style='background:#f3e8ff;color:#6b21a8;padding:5px 14px;border-radius:999px;font-size:14px;font-weight:800;display:inline-block;'>
+                        {$detailedCount}
+                    </span>
+                </td>
+                <td style='padding:14px 12px;font-size:12px;color:#475569;direction:ltr;text-align:right;font-family:monospace;'>{$item['last_date']}</td>
+                <td style='padding:14px 12px;text-align:center;'>
+                    <div style='display:flex;align-items:center;justify-content:center;gap:6px;'>
+                        <button type='button' class='epc-open-log-btn' data-part-key='{$partKey}' style='background:#0f172a;color:#ffffff;border:none;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:4px;'>
+                            📋 السجل
                         </button>
+                        <form method='POST' action='{$deleteUrl}' onsubmit=\"return confirm('هل أنت متأكد من حذف هذا الصنف ({$partDisplay}) من الرادار؟');\" style='display:inline;margin:0;'>
+                            <input type='hidden' name='_token' value='{$csrfToken}'>
+                            <input type='hidden' name='_method' value='DELETE'>
+                            <button type='submit' title='حذف هذا الصنف من الرادار' style='background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;'>
+                                🗑️
+                            </button>
+                        </form>
                     </div>
-                    <div style='font-size:11px;color:#64748b;margin-top:3px;'>شامل التكرار بنفس اليوم</div>
                 </td>
-                <td style='padding:12px;font-size:12px;color:#475569;direction:ltr;text-align:right;'>{$item['last_date']}</td>
             </tr>";
         }
 
         if ($radarRowsHtml === '') {
-            $radarRowsHtml = "<tr><td colspan='6' style='padding:24px;text-align:center;color:#64748b;font-size:14px;'>لا توجد أرقام مسجلة في الرادار مطابقة للبحث الحالي.</td></tr>";
+            $radarRowsHtml = "<tr id='epc-empty-radar-row'><td colspan='8' style='padding:32px;text-align:center;color:#64748b;font-size:14px;'>لا توجد أرقام مسجلة في الرادار حتى الآن.</td></tr>";
         }
 
-        $detailsJson = json_encode($detailsMapForJs, JSON_UNESCAPED_UNICODE);
+        $detailsJson  = json_encode($detailsMapForJs, JSON_UNESCAPED_UNICODE);
         $clearLogsUrl = route('pages.second.logs.clear');
-        $radarUrl     = route('admin.radar.page');
-        $searchSafe   = htmlspecialchars($search, ENT_QUOTES, 'UTF-8');
-
-        $selAll     = $statusFilter === 'all' ? 'selected' : '';
-        $selAvail   = $statusFilter === 'available' ? 'selected' : '';
-        $selUnavail = $statusFilter === 'unavailable' ? 'selected' : '';
 
         $contentHtml = <<<HTML
-        <div style="padding:24px;max-width:1350px;margin:0 auto;direction:rtl;">
-            <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px;margin-bottom:22px;">
+        <div style="padding:28px;max-width:1400px;margin:0 auto;direction:rtl;background:#f8fafc;min-height:100vh;">
+            <!-- الهيدر العلوي العصري -->
+            <div style="background:linear-gradient(135deg, #0f172a 0%, #1e293b 100%);color:#ffffff;padding:24px 28px;border-radius:18px;margin-bottom:22px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;box-shadow:0 8px 20px rgba(15,23,42,0.08);">
                 <div>
-                    <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;">📡 رادار الطلبات العام الموحد (خاص بالأدمن)</h1>
-                    <p style="margin:6px 0 0 0;font-size:14px;color:#64748b;">
-                        يجمع كافة الأرقام التي تم تسعيرها أو طلبها من جميع العملاء والمتاجر بدون تكرار رقم الصنف، مع فصل العد اليومي عن العد التفصيلي الشامل.
+                    <h1 style="margin:0;font-size:24px;font-weight:800;display:flex;align-items:center;gap:10px;">
+                        📡 رادار الأصناف المطلوبة والنواقص
+                    </h1>
+                    <p style="margin:6px 0 0 0;font-size:13px;color:#cbd5e1;">
+                        يجمع كافة الأرقام التي تم تسعيرها أو طلبها من جميع العملاء تلقائياً مع إحصائيات الكميات والتكرار
                     </p>
                 </div>
-                <div style="display:flex;gap:12px;align-items:center;">
-                    <div style="background:#eff6ff;border:1px solid #bfdbfe;padding:10px 16px;border-radius:10px;text-align:center;">
-                        <div style="font-size:11px;color:#1e40af;font-weight:700;">إجمالي الأصناف الفريدة</div>
-                        <div style="font-size:20px;font-weight:800;color:#1d4ed8;">{$totalUniqueParts}</div>
-                    </div>
-                    <div style="background:#faf5ff;border:1px solid #e9d5ff;padding:10px 16px;border-radius:10px;text-align:center;">
-                        <div style="font-size:11px;color:#6b21a8;font-weight:700;">إجمالي عمليات التسعير التفصيلية</div>
-                        <div style="font-size:20px;font-weight:800;color:#7e22ce;">{$totalDetailedCalls}</div>
-                    </div>
-                    <form method="POST" action="{$clearLogsUrl}" onsubmit="return confirm('هل أنت متأكد من تصفير ومسح سجل الرادار بالكامل؟');">
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+                    <button type="button" id="epc-open-export-modal-btn" style="background:#16a34a;color:#ffffff;border:none;padding:10px 18px;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 10px rgba(22,163,74,0.25);">
+                        📊 تصدير إلى Excel
+                    </button>
+                    <form method="POST" action="{$clearLogsUrl}" onsubmit="return confirm('هل أنت متأكد من تصفير ومسح سجل الرادار بالكامل؟');" style="margin:0;">
                         <input type="hidden" name="_token" value="{$csrfToken}">
                         <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:10px 16px;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px;">
-                            🗑️ تصفير الرادار
+                            🗑️ حذف السجل بالكامل
                         </button>
                     </form>
                 </div>
             </div>
 
-            <!-- شريط البحث والفلترة -->
-            <form method="GET" action="{$radarUrl}" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;">
-                <input type="text" name="search" value="{$searchSafe}" placeholder="ابحث برقم الصنف (مع شرطة أو بدون) أو اسم القطعة..." style="flex:1;min-width:260px;padding:10px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;">
-                <select name="status" style="padding:10px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;background:#f8fafc;">
-                    <option value="all" {$selAll}>📦 جميع الحالات (المتوفر وغير المتوفر)</option>
-                    <option value="available" {$selAvail}>✅ الأصناف المتوفرة فقط</option>
-                    <option value="unavailable" {$selUnavail}>❌ الأصناف غير المتوفرة (النواقص)</option>
-                </select>
-                <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:10px 22px;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px;">
-                    🔍 بحث وفلترة
-                </button>
-                <a href="{$radarUrl}" style="padding:10px 16px;border-radius:8px;border:1px solid #cbd5e1;color:#475569;text-decoration:none;font-size:13px;font-weight:700;">إعادة ضبط</a>
-            </form>
+            <!-- بطاقات الإحصائيات السريعة المريحة للعين -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-bottom:22px;">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                    <div>
+                        <div style="font-size:13px;color:#64748b;font-weight:700;">إجمالي الأصناف المعروضة</div>
+                        <div id="epc-stat-visible-count" style="font-size:24px;font-weight:800;color:#0f172a;margin-top:4px;">{$totalUniqueParts}</div>
+                    </div>
+                    <div style="background:#eff6ff;color:#2563eb;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">📦</div>
+                </div>
 
-            <!-- جدول الرادار الموحد بدون تكرار رقم الصنف -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                    <div>
+                        <div style="font-size:13px;color:#64748b;font-weight:700;">أصناف غير متوفرة (نواقص)</div>
+                        <div style="font-size:24px;font-weight:800;color:#dc2626;margin-top:4px;">{$totalMissingParts}</div>
+                    </div>
+                    <div style="background:#fef2f2;color:#dc2626;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">❌</div>
+                </div>
+
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                    <div>
+                        <div style="font-size:13px;color:#64748b;font-weight:700;">أصناف متوفرة بالكامل</div>
+                        <div style="font-size:24px;font-weight:800;color:#16a34a;margin-top:4px;">{$totalAvailParts}</div>
+                    </div>
+                    <div style="background:#f0fdf4;color:#16a34a;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">✅</div>
+                </div>
+
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                    <div>
+                        <div style="font-size:13px;color:#64748b;font-weight:700;">إجمالي الكمية المطلوبة</div>
+                        <div style="font-size:24px;font-weight:800;color:#b45309;margin-top:4px;">{$totalRequestedUnits} <span style="font-size:13px;font-weight:600;">حبة</span></div>
+                    </div>
+                    <div style="background:#fffbeb;color:#d97706;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">🔢</div>
+                </div>
+            </div>
+
+            <!-- شريط البحث الفوري الحي + الفلترة + الترتيب الذكي المتعدد -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:18px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                <div style="flex:1;min-width:260px;position:relative;">
+                    <input type="text" id="epc-radar-live-search" placeholder="🔍 بحث فوري حي برقم الصنف (مع شرطة أو بدون) أو اسم القطعة..." style="width:100%;padding:11px 16px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;background:#f8fafc;">
+                </div>
+
+                <select id="epc-radar-status-filter" style="padding:11px 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:13px;font-weight:700;background:#f8fafc;color:#1e293b;cursor:pointer;">
+                    <option value="all">📦 جميع الحالات (المتوفر وغير المتوفر)</option>
+                    <option value="unavailable">❌ الأصناف غير المتوفرة (النواقص)</option>
+                    <option value="available">✅ الأصناف المتوفرة فقط</option>
+                </select>
+
+                <select id="epc-radar-sort-select" style="padding:11px 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:13px;font-weight:700;background:#f8fafc;color:#1e293b;cursor:pointer;">
+                    <option value="days_desc">🔥 الترتيب: الأكثر طلباً (يومي)</option>
+                    <option value="detailed_desc">📈 الترتيب: الأكثر تكراراً (إجمالي)</option>
+                    <option value="qty_desc">🔢 الترتيب: الأعلى كمية مطلوبة</option>
+                    <option value="unavail_desc">⚠️ الترتيب: النواقص الأكثر طلباً أولاً</option>
+                    <option value="date_desc">🕒 الترتيب: الأحدث طلباً أولاً</option>
+                    <option value="date_asc">⏳ الترتيب: الأقدم طلباً أولاً</option>
+                </select>
+
+                <button type="button" id="epc-radar-reset-btn" style="padding:11px 16px;border-radius:10px;border:1px solid #cbd5e1;background:#ffffff;color:#475569;font-size:13px;font-weight:700;cursor:pointer;">
+                    إعادة ضبط
+                </button>
+            </div>
+
+            <!-- جدول الرادار الموحد -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.03);">
                 <div style="overflow-x:auto;">
-                    <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
+                    <table id="epc-radar-table" style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
                         <thead>
                             <tr style="background:#0f172a;color:#ffffff;">
-                                <th style="padding:14px 12px;">رقم الصنف (بدون تكرار)</th>
-                                <th style="padding:14px 12px;">اسم الصنف</th>
-                                <th style="padding:14px 12px;">حالة التوفر المسجلة</th>
-                                <th style="padding:14px 12px;text-align:center;">عدد مرات الطلب اليومي (أقصى 1 باليوم)</th>
-                                <th style="padding:14px 12px;text-align:center;">العداد التفصيلي الشامل (شامل تكرار اليوم)</th>
-                                <th style="padding:14px 12px;">تاريخ آخر تسعير</th>
+                                <th style="padding:15px 12px;">رقم الصنف</th>
+                                <th style="padding:15px 12px;">اسم الصنف</th>
+                                <th style="padding:15px 12px;">حالة التوفر</th>
+                                <th style="padding:15px 12px;text-align:center;">إجمالي الكمية المطلوبة</th>
+                                <th style="padding:15px 12px;text-align:center;">مرات الطلب (يومي)</th>
+                                <th style="padding:15px 12px;text-align:center;">مرات الطلب (مكرر)</th>
+                                <th style="padding:15px 12px;">تاريخ آخر طلب</th>
+                                <th style="padding:15px 12px;text-align:center;">إجراءات</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="epc-radar-tbody">
                             {$radarRowsHtml}
                         </tbody>
                     </table>
@@ -3403,28 +4053,59 @@ HTML;
             </div>
         </div>
 
-        <!-- نافذة عرض السجل التفصيلي بالتواريخ لكل رقم صنف -->
-        <div id="epc-radar-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:9999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
-            <div style="background:#ffffff;width:100%;max-width:950px;border-radius:16px;overflow:hidden;box-shadow:0 20px 25px -5px rgba(0,0,0,0.2);">
-                <div style="background:#0f172a;color:#ffffff;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                        <h3 id="epc-modal-title" style="margin:0;font-size:18px;">السجل التفصيلي للصنف</h3>
-                        <p id="epc-modal-subtitle" style="margin:4px 0 0 0;font-size:12px;color:#cbd5e1;"></p>
-                    </div>
-                    <button type="button" onclick="closeRadarDetailsModal()" style="background:#ef4444;color:#fff;border:none;padding:6px 14px;border-radius:8px;cursor:pointer;font-weight:700;">✕ إغلاق</button>
+        <!-- نافذة اختيار نوع تصدير الإكسل (عادي / تفصيلي) -->
+        <div id="epc-export-choice-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
+            <div style="background:#ffffff;width:100%;max-width:520px;border-radius:18px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.35);">
+                <div style="background:#0f172a;color:#ffffff;padding:18px 22px;display:flex;justify-content:space-between;align-items:center;">
+                    <h3 style="margin:0;font-size:17px;font-weight:800;">📊 اختر نوع التصدير إلى Excel</h3>
+                    <button type="button" id="epc-close-export-modal-btn" style="background:transparent;color:#cbd5e1;border:none;font-size:18px;cursor:pointer;font-weight:800;">✕</button>
                 </div>
-                <div style="padding:20px;max-height:480px;overflow-y:auto;">
+                <div style="padding:22px;">
+                    <p style="margin:0 0 16px 0;font-size:13px;color:#475569;">
+                        سيتم تصدير <b>الأصناف المفلترة والظاهرة حالياً في الجدول فقط</b> حسب اختيارك:
+                    </p>
+
+                    <div style="display:flex;flex-direction:column;gap:12px;">
+                        <button type="button" id="epc-do-export-normal" style="text-align:right;background:#f0fdf4;border:2px solid #86efac;border-radius:14px;padding:16px;cursor:pointer;transition:all 0.15s;">
+                            <div style="font-size:15px;font-weight:800;color:#166534;margin-bottom:4px;">1️⃣ تصدير عادي (ملخص الجدول بدون تكرار)</div>
+                            <div style="font-size:12px;color:#15803d;line-height:1.5;">
+                                يصدر البيانات كما هي ظاهرة في الجدول (العمود A رقم الصنف، العمود B اسم الصنف، حالة التوفر، إجمالي الكمية، مرات الطلب اليومي والمكرر، وتاريخ آخر طلب) بدون تكرار رقم الصنف.
+                            </div>
+                        </button>
+
+                        <button type="button" id="epc-do-export-detailed" style="text-align:right;background:#eff6ff;border:2px solid #93c5fd;border-radius:14px;padding:16px;cursor:pointer;transition:all 0.15s;">
+                            <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:4px;">2️⃣ تصدير تفصيلي (شامل تكرار جميع الطلبات)</div>
+                            <div style="font-size:12px;color:#1d4ed8;line-height:1.5;">
+                                يصدر كل عملية طلب في سطر مستقل (إذا تكرر الصنف 100 مرة يظهر 100 مرة بكامل تفاصيله: رقم الصنف، اسم الصنف، الحالة، الكمية المطلوبة، السعر، رقم العميل، التاجر، والتاريخ) بدون إجمالي الكمية ومرات الطلب اليومي.
+                            </div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- نافذة عرض السجل التفصيلي بالتواريخ لكل رقم صنف -->
+        <div id="epc-radar-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
+            <div style="background:#ffffff;width:100%;max-width:980px;border-radius:18px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.35);">
+                <div style="background:#0f172a;color:#ffffff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <h3 id="epc-modal-title" style="margin:0;font-size:18px;font-weight:800;">السجل التفصيلي للصنف</h3>
+                        <p id="epc-modal-subtitle" style="margin:5px 0 0 0;font-size:13px;color:#cbd5e1;"></p>
+                    </div>
+                    <button type="button" id="epc-close-modal-btn" style="background:#ef4444;color:#fff;border:none;padding:7px 16px;border-radius:8px;cursor:pointer;font-weight:700;">✕ إغلاق</button>
+                </div>
+                <div style="padding:20px;max-height:500px;overflow-y:auto;">
                     <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
                         <thead>
                             <tr style="background:#f1f5f9;color:#334155;">
-                                <th style="padding:10px;">#</th>
-                                <th style="padding:10px;">التاريخ والوقت</th>
-                                <th style="padding:10px;">رقم جوال العميل</th>
-                                <th style="padding:10px;">المتجر / التاجر</th>
-                                <th style="padding:10px;">الحالة وقت الطلب</th>
-                                <th style="padding:10px;">الكمية (مطلوب / متوفر)</th>
-                                <th style="padding:10px;">السعر</th>
-                                <th style="padding:10px;">المصدر</th>
+                                <th style="padding:12px 10px;">#</th>
+                                <th style="padding:12px 10px;">التاريخ والوقت</th>
+                                <th style="padding:12px 10px;">رقم جوال العميل</th>
+                                <th style="padding:12px 10px;">المتجر / التاجر</th>
+                                <th style="padding:12px 10px;">الحالة وقت الطلب</th>
+                                <th style="padding:12px 10px;">الكمية (مطلوب / متوفر)</th>
+                                <th style="padding:12px 10px;">السعر</th>
+                                <th style="padding:12px 10px;">المصدر</th>
                             </tr>
                         </thead>
                         <tbody id="epc-modal-tbody"></tbody>
@@ -3434,45 +4115,271 @@ HTML;
         </div>
 
         <script>
-        window.epcRadarDetailsData = {$detailsJson};
+        (function () {
+            const radarDetailsData = {$detailsJson};
+            const searchInput      = document.getElementById('epc-radar-live-search');
+            const statusSelect     = document.getElementById('epc-radar-status-filter');
+            const sortSelect       = document.getElementById('epc-radar-sort-select');
+            const resetBtn         = document.getElementById('epc-radar-reset-btn');
+            const openExportBtn    = document.getElementById('epc-open-export-modal-btn');
+            const exportModal      = document.getElementById('epc-export-choice-modal');
+            const closeExportBtn   = document.getElementById('epc-close-export-modal-btn');
+            const btnExportNormal  = document.getElementById('epc-do-export-normal');
+            const btnExportDetail  = document.getElementById('epc-do-export-detailed');
+            const tbody            = document.getElementById('epc-radar-tbody');
+            const modal            = document.getElementById('epc-radar-modal');
+            const closeModal       = document.getElementById('epc-close-modal-btn');
+            const visibleCount     = document.getElementById('epc-stat-visible-count');
 
-        function openRadarDetailsModal(partKey) {
-            const data = window.epcRadarDetailsData[partKey];
-            if (!data) return;
+            // 1. فتح نافذة السجل التفصيلي
+            function openDetailsModal(partKey) {
+                const data = radarDetailsData[partKey];
+                if (!data) return;
 
-            document.getElementById('epc-modal-title').textContent = '🔍 السجل التفصيلي لرقم الصنف: ' + data.part_number + ' (' + data.item_name + ')';
-            document.getElementById('epc-modal-subtitle').textContent =
-                'عدد الأيام الفريدة (بدون تكرار باليوم): ' + data.unique_days + ' | إجمالي مرات التسعير التفصيلية (شامل التكرار بنفس اليوم): ' + data.detailed_count;
+                document.getElementById('epc-modal-title').textContent = '📋 السجل التفصيلي لرقم الصنف: ' + data.part_number + ' (' + data.item_name + ')';
+                document.getElementById('epc-modal-subtitle').textContent =
+                    'إجمالي الكمية المطلوبة: ' + data.total_req_qty + ' حبة | عدد الأيام الفريدة: ' + data.unique_days + ' | إجمالي مرات الطلب: ' + data.detailed_count;
 
-            const tbody = document.getElementById('epc-modal-tbody');
-            tbody.innerHTML = '';
+                const modalTbody = document.getElementById('epc-modal-tbody');
+                modalTbody.innerHTML = '';
 
-            data.records.forEach(function(rec, idx) {
-                const stBadge = rec.status === 'available'
-                    ? "<span style='background:#dcfce7;color:#166534;padding:2px 8px;border-radius:6px;font-weight:700;font-size:12px;'>✅ متوفر</span>"
-                    : "<span style='background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:6px;font-weight:700;font-size:12px;'>❌ غير متوفر</span>";
+                data.records.forEach(function (rec, idx) {
+                    const stBadge = rec.status === 'available'
+                        ? "<span style='background:#dcfce7;color:#166534;padding:3px 8px;border-radius:6px;font-weight:700;font-size:12px;'>✅ متوفر</span>"
+                        : "<span style='background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:6px;font-weight:700;font-size:12px;'>❌ غير متوفر</span>";
 
-                const tr = document.createElement('tr');
-                tr.style.borderBottom = '1px solid #e2e8f0';
-                tr.innerHTML = `
-                    <td style="padding:10px;font-weight:700;">\${idx + 1}</td>
-                    <td style="padding:10px;direction:ltr;font-family:monospace;">\${rec.date}</td>
-                    <td style="padding:10px;font-weight:700;font-family:monospace;">\${rec.customer}</td>
-                    <td style="padding:10px;">\${rec.merchant}</td>
-                    <td style="padding:10px;">\${stBadge}</td>
-                    <td style="padding:10px;">مطلوب: <b>\${rec.req_qty}</b> | متوفر: <b>\${rec.avail_qty}</b></td>
-                    <td style="padding:10px;">\${rec.price}</td>
-                    <td style="padding:10px;">\${rec.source}</td>
-                `;
-                tbody.appendChild(tr);
+                    const cleanDigits = (rec.customer || '').replace(/\\D/g, '');
+                    const waLink = cleanDigits.length >= 9
+                        ? `<a href="https://wa.me/\${cleanDigits}" target="_blank" style="color:#16a34a;text-decoration:none;font-weight:800;margin-right:6px;" title="مراسلة عبر واتساب">💬</a>`
+                        : '';
+
+                    const tr = document.createElement('tr');
+                    tr.style.borderBottom = '1px solid #f1f5f9';
+                    tr.innerHTML = `
+                        <td style="padding:10px;font-weight:700;">\${idx + 1}</td>
+                        <td style="padding:10px;direction:ltr;font-family:monospace;">\${rec.date}</td>
+                        <td style="padding:10px;font-weight:700;font-family:monospace;">\${rec.customer} \${waLink}</td>
+                        <td style="padding:10px;">\${rec.merchant}</td>
+                        <td style="padding:10px;">\${stBadge}</td>
+                        <td style="padding:10px;">مطلوب: <b>\${rec.req_qty}</b> | متوفر: <b>\${rec.avail_qty}</b></td>
+                        <td style="padding:10px;">\${rec.price}</td>
+                        <td style="padding:10px;">\${rec.source}</td>
+                    `;
+                    modalTbody.appendChild(tr);
+                });
+
+                modal.style.display = 'flex';
+            }
+
+            document.addEventListener('click', function (e) {
+                const logBtn = e.target.closest('.epc-open-log-btn');
+                if (logBtn) {
+                    e.preventDefault();
+                    openDetailsModal(logBtn.getAttribute('data-part-key'));
+                }
+                if (e.target === modal) {
+                    modal.style.display = 'none';
+                }
+                if (e.target === exportModal) {
+                    exportModal.style.display = 'none';
+                }
             });
 
-            document.getElementById('epc-radar-modal').style.display = 'flex';
-        }
+            if (closeModal) {
+                closeModal.addEventListener('click', function () {
+                    modal.style.display = 'none';
+                });
+            }
 
-        function closeRadarDetailsModal() {
-            document.getElementById('epc-radar-modal').style.display = 'none';
-        }
+            // 2. البحث الفوري الحي + الفلترة + الترتيب الذكي المتعدد
+            function applyLiveFilterAndSort() {
+                if (!tbody) return;
+                const rawQuery   = (searchInput.value || '').trim().toLowerCase();
+                const cleanQuery = rawQuery.replace(/[^a-z0-9\\u0600-\\u06FF]/g, '');
+                const statusVal  = statusSelect.value;
+                const sortVal    = sortSelect.value;
+
+                const rows = Array.from(tbody.querySelectorAll('.epc-radar-row'));
+                let shown = 0;
+
+                rows.forEach(function (row) {
+                    const searchData = (row.getAttribute('data-search') || '').toLowerCase();
+                    const rowStatus  = row.getAttribute('data-status-type') || 'all';
+
+                    let matchSearch = true;
+                    if (rawQuery !== '') {
+                        matchSearch = searchData.includes(rawQuery) || (cleanQuery !== '' && searchData.includes(cleanQuery));
+                    }
+
+                    let matchStatus = true;
+                    if (statusVal === 'available') {
+                        matchStatus = (rowStatus === 'available' || rowStatus === 'mixed');
+                    } else if (statusVal === 'unavailable') {
+                        matchStatus = (rowStatus === 'unavailable' || rowStatus === 'mixed');
+                    }
+
+                    if (matchSearch && matchStatus) {
+                        row.style.display = '';
+                        shown++;
+                    } else {
+                        row.style.display = 'none';
+                    }
+                });
+
+                rows.sort(function (a, b) {
+                    if (sortVal === 'days_desc') {
+                        const d = parseInt(b.dataset.days, 10) - parseInt(a.dataset.days, 10);
+                        return d !== 0 ? d : parseInt(b.dataset.detailed, 10) - parseInt(a.dataset.detailed, 10);
+                    }
+                    if (sortVal === 'detailed_desc') {
+                        return parseInt(b.dataset.detailed, 10) - parseInt(a.dataset.detailed, 10);
+                    }
+                    if (sortVal === 'qty_desc') {
+                        return parseInt(b.dataset.qty, 10) - parseInt(a.dataset.qty, 10);
+                    }
+                    if (sortVal === 'unavail_desc') {
+                        return parseInt(b.dataset.unavail, 10) - parseInt(a.dataset.unavail, 10);
+                    }
+                    if (sortVal === 'date_desc') {
+                        return (b.dataset.date || '').localeCompare(a.dataset.date || '');
+                    }
+                    if (sortVal === 'date_asc') {
+                        return (a.dataset.date || '').localeCompare(b.dataset.date || '');
+                    }
+                    return 0;
+                });
+
+                rows.forEach(r => tbody.appendChild(r));
+                if (visibleCount) visibleCount.textContent = shown;
+            }
+
+            if (searchInput)  searchInput.addEventListener('input', applyLiveFilterAndSort);
+            if (statusSelect) statusSelect.addEventListener('change', applyLiveFilterAndSort);
+            if (sortSelect)   sortSelect.addEventListener('change', applyLiveFilterAndSort);
+
+            if (resetBtn) {
+                resetBtn.addEventListener('click', function () {
+                    searchInput.value  = '';
+                    statusSelect.value = 'all';
+                    sortSelect.value   = 'days_desc';
+                    applyLiveFilterAndSort();
+                });
+            }
+
+            // 3. دالة تحميل ملف CSV متوافق مع Excel ويدعم العربية
+            function downloadCsvFile(csvLines, filePrefix) {
+                const bom  = '\\uFEFF';
+                const blob = new Blob([bom + csvLines.join('\\r\\n')], { type: 'text/csv;charset=utf-8;' });
+                const url  = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href     = url;
+                link.download = filePrefix + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+
+            if (openExportBtn) {
+                openExportBtn.addEventListener('click', function () {
+                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
+                        .filter(r => r.style.display !== 'none');
+                    if (visibleRows.length === 0) {
+                        alert('لا توجد أصناف ظاهرة حالياً لتصديرها.');
+                        return;
+                    }
+                    exportModal.style.display = 'flex';
+                });
+            }
+
+            if (closeExportBtn) {
+                closeExportBtn.addEventListener('click', function () {
+                    exportModal.style.display = 'none';
+                });
+            }
+
+            // أ) تصدير عادي (كما هو ظاهر في الجدول بدون تكرار للأصناف المفلترة)
+            if (btnExportNormal) {
+                btnExportNormal.addEventListener('click', function () {
+                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
+                        .filter(r => r.style.display !== 'none');
+
+                    const csvLines = [];
+                    csvLines.push([
+                        'رقم الصنف',
+                        'اسم الصنف',
+                        'حالة التوفر',
+                        'إجمالي الكمية المطلوبة',
+                        'مرات الطلب (يومي)',
+                        'مرات الطلب (مكرر)',
+                        'تاريخ آخر طلب'
+                    ].map(h => '"' + h.replace(/"/g, '""') + '"').join(','));
+
+                    visibleRows.forEach(function (r) {
+                        const rowCols = [
+                            r.getAttribute('data-part') || '',
+                            r.getAttribute('data-name') || '',
+                            r.getAttribute('data-status-text') || '',
+                            r.getAttribute('data-qty') || '0',
+                            r.getAttribute('data-days') || '0',
+                            r.getAttribute('data-detailed') || '0',
+                            r.getAttribute('data-date') || ''
+                        ];
+                        csvLines.push(rowCols.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(','));
+                    });
+
+                    exportModal.style.display = 'none';
+                    downloadCsvFile(csvLines, 'radar_summary_export');
+                });
+            }
+
+            // ب) تصدير تفصيلي (مع تكرار كل عملية طلب للصنف وبدون إجمالي الكمية ومرات الطلب اليومي)
+            if (btnExportDetail) {
+                btnExportDetail.addEventListener('click', function () {
+                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
+                        .filter(r => r.style.display !== 'none');
+
+                    const csvLines = [];
+                    csvLines.push([
+                        'رقم الصنف',
+                        'اسم الصنف',
+                        'الحالة وقت الطلب',
+                        'الكمية المطلوبة',
+                        'الكمية المتوفرة',
+                        'السعر',
+                        'رقم جوال العميل',
+                        'المتجر / التاجر',
+                        'المصدر',
+                        'التاريخ والوقت'
+                    ].map(h => '"' + h.replace(/"/g, '""') + '"').join(','));
+
+                    visibleRows.forEach(function (r) {
+                        const partKey = r.getAttribute('data-part-key') || '';
+                        const itemObj = radarDetailsData[partKey];
+                        if (!itemObj || !Array.isArray(itemObj.records)) return;
+
+                        itemObj.records.forEach(function (rec) {
+                            const statusAr = rec.status === 'available' ? 'متوفر' : 'غير متوفر';
+                            const rowCols = [
+                                itemObj.part_number || '',
+                                itemObj.item_name || '',
+                                statusAr,
+                                rec.req_qty || '1',
+                                rec.avail_qty || '0',
+                                rec.price || '—',
+                                rec.customer || '',
+                                rec.merchant || '',
+                                rec.source || '',
+                                rec.date || ''
+                            ];
+                            csvLines.push(rowCols.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(','));
+                        });
+                    });
+
+                    exportModal.style.display = 'none';
+                    downloadCsvFile(csvLines, 'radar_detailed_export');
+                });
+            }
+        })();
         </script>
 HTML;
 
@@ -3654,4 +4561,54 @@ HTML;
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+    // مسارات حفظ واستعادة تعديلات الواجهة المرئية بالماوس للأدمن
+    Route::post('/ui-customizations/save', function (Request $request) {
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        if (!Schema::hasTable('ui_customizations')) {
+            Schema::create('ui_customizations', function (Blueprint $table) {
+                $table->id();
+                $table->string('page_path')->index();
+                $table->string('selector');
+                $table->text('text_content')->nullable();
+                $table->string('placeholder')->nullable();
+                $table->text('styles')->nullable();
+                $table->timestamps();
+                $table->unique(['page_path', 'selector']);
+            });
+        }
+
+        $pagePath = trim((string) $request->input('page_path', '/'));
+        $selector = trim((string) $request->input('selector', ''));
+        if ($selector === '') {
+            return response()->json(['status' => 'error'], 422);
+        }
+
+        DB::table('ui_customizations')->updateOrInsert(
+            ['page_path' => $pagePath, 'selector' => $selector],
+            [
+                'text_content' => $request->input('text_content'),
+                'placeholder'  => $request->input('placeholder'),
+                'styles'       => json_encode($request->input('styles', []), JSON_UNESCAPED_UNICODE),
+                'updated_at'   => now(),
+                'created_at'   => now(),
+            ]
+        );
+
+        return response()->json(['status' => 'success']);
+    })->name('ui.customizations.save');
+
+    Route::post('/ui-customizations/reset', function (Request $request) {
+        if (auth()->user()->role !== 'admin') abort(403);
+
+        if (Schema::hasTable('ui_customizations')) {
+            $query = DB::table('ui_customizations')->where('page_path', $request->input('page_path', '/'));
+            if ($request->filled('selector')) {
+                $query->where('selector', $request->input('selector'));
+            }
+            $query->delete();
+        }
+
+        return response()->json(['status' => 'success']);
+    })->name('ui.customizations.reset');
 });

@@ -85,7 +85,7 @@
 
         <form method="POST" action="{{ route('inventory.store') }}" class="grid grid-cols-1 md:grid-cols-5 gap-4">
             @csrf
-            <input type="text" name="item_number" value="{{ old('item_number') }}" placeholder="رقم الصنف (فريد)" required
+            <input type="text" name="item_number" value="{{ old('item_number') }}" placeholder="رقم الصنف" required
                    class="border border-slate-300 rounded-lg px-3 py-2 text-sm uppercase">
 
             <input type="text" name="item_name" value="{{ old('item_name') }}" placeholder="اسم الصنف / الترجمة" required

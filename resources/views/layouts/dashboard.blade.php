@@ -36,7 +36,7 @@
             <a href="{{ route('pages.second') }}"
                class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('pages.second') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">
                 <span>🤖</span>
-                <span>الرد الآلي (AI)</span>
+                <span>بوت الواتساب</span>
             </a>
 
             @if(auth()->check() && auth()->user()->role === 'admin')

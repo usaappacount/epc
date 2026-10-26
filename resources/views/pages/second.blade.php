@@ -165,9 +165,9 @@
             <div class="p-4 bg-emerald-50/50 rounded-xl border border-emerald-200 flex items-center justify-between gap-4">
                 <div>
                     <label for="allow_group_replies" class="font-bold text-slate-800 text-sm block cursor-pointer">
-                        👥 تفعيل التفاعل في المجموعات (القروبات)
+                        👥 مجموعات الواتساب
                     </label>
-                    <p class="text-xs text-slate-600 mt-0.5">عند تعطيل الخيار، يتجاهل البوت أي رسائل ترد داخل المجموعات بشكل كامل.</p>
+                    <p class="text-xs text-slate-600 mt-0.5">عند التفعيل ( سيقوم البوت بالرد على اعضاء المجموعة برساله ( ع الخاص ) في حال قم عضو بالتسعير</p>
                 </div>
                 <div class="flex items-center">
                     <input type="hidden" name="allow_group_replies" value="0">
