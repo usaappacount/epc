@@ -53,7 +53,7 @@
         <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
             <h3 class="font-bold text-slate-800">نتيجة البحث برقم الصنف:</h3>
 
-            @forelse($matchedItems as$item)
+            @forelse($matchedItems as $item)
                 <div class="p-4 bg-emerald-50 border-emerald-200 border rounded-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                     <div>
                         <p class="font-bold text-slate-800">
