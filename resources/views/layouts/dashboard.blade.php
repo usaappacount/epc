@@ -56,13 +56,6 @@
                     <span> المخزون ( خاص )</span>
                 </a>
 
-                <!-- قاموس السيارات لتعليم الـ AI -->
-                <a href="{{ route('cars.dictionary') }}"
-                   class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('cars.*') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">
-                    <span>🚗</span>
-                    <span>إعدادات السيارات والـ AI</span>
-                </a>
-
                 <!-- إعدادات الربط API -->
                 <a href="{{ route('pages.third') }}"
                    class="flex items-center gap-3 px-4 py-3 rounded-lg transition {{ request()->routeIs('pages.third') ? 'bg-emerald-600 text-white font-semibold' : 'text-slate-300 hover:bg-slate-800' }}">

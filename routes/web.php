@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Database\Schema\Blueprint;
+use Carbon\Carbon;
 
 /*
 |--------------------------------------------------------------------------
@@ -42,23 +43,92 @@ try {
             $table->unsignedBigInteger('user_id')->default(1)->index();
             $table->string('phone')->index();
             $table->integer('queries_count')->default(0);
+            $table->timestamp('last_reset_at')->nullable();
             $table->timestamps();
             $table->unique(['user_id', 'phone']);
         });
+    } else {
+        if (!Schema::hasColumn('whatsapp_customer_quotas', 'last_reset_at')) {
+            Schema::table('whatsapp_customer_quotas', function (Blueprint $table) {
+                $table->timestamp('last_reset_at')->nullable();
+            });
+        }
     }
 
+    // جدول الاستثناءات المتقدم (حدود مخصصة + أوقات مسموحة + صلاحيات عرض دقيقة + إكسل)
     if (!Schema::hasTable('whatsapp_whitelist_phones')) {
         Schema::create('whatsapp_whitelist_phones', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('user_id')->default(1)->index();
             $table->string('phone')->index();
             $table->string('label')->nullable();
+            $table->integer('custom_quota')->nullable();
+            $table->string('allowed_start_time', 10)->nullable();
+            $table->string('allowed_end_time', 10)->nullable();
+            $table->boolean('allow_available')->default(true);
+            $table->boolean('allow_unavailable')->default(true);
+            $table->boolean('allow_prices')->default(true);
+            $table->boolean('allow_quantities')->default(true);
+            $table->boolean('allow_excel')->default(true);
+            $table->timestamps();
+            $table->unique(['user_id', 'phone']);
+        });
+    } else {
+        $whitelistCols = [
+            'custom_quota'       => fn(Blueprint $t) => $t->integer('custom_quota')->nullable(),
+            'allowed_start_time' => fn(Blueprint $t) => $t->string('allowed_start_time', 10)->nullable(),
+            'allowed_end_time'   => fn(Blueprint $t) => $t->string('allowed_end_time', 10)->nullable(),
+            'allow_available'    => fn(Blueprint $t) => $t->boolean('allow_available')->default(true),
+            'allow_unavailable'  => fn(Blueprint $t) => $t->boolean('allow_unavailable')->default(true),
+            'allow_prices'       => fn(Blueprint $t) => $t->boolean('allow_prices')->default(true),
+            'allow_quantities'   => fn(Blueprint $t) => $t->boolean('allow_quantities')->default(true),
+            'allow_excel'        => fn(Blueprint $t) => $t->boolean('allow_excel')->default(true),
+        ];
+        foreach ($whitelistCols as $colName => $colClosure) {
+            if (!Schema::hasColumn('whatsapp_whitelist_phones', $colName)) {
+                Schema::table('whatsapp_whitelist_phones', $colClosure);
+            }
+        }
+    }
+
+    // جدول القائمة السوداء (Blacklist)
+    if (!Schema::hasTable('whatsapp_blacklist_phones')) {
+        Schema::create('whatsapp_blacklist_phones', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->default(1)->index();
+            $table->string('phone')->index();
+            $table->string('reason')->nullable();
             $table->timestamps();
             $table->unique(['user_id', 'phone']);
         });
     }
 
-    // ترقية جدول قلب النظام (master_items) ليدعم تسجيل أكثر من سيارة وموديل لنفس الرقم الموحد
+    // جدول سجل ورادار الطلبات الشامل (يسجل المتوفر وغير المتوفر بالتواريخ والكميات والأسعار من جميع العملاء)
+    if (!Schema::hasTable('whatsapp_inquiry_logs')) {
+        Schema::create('whatsapp_inquiry_logs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id')->default(1)->index();
+            $table->string('phone')->index();
+            $table->string('part_number')->index();
+            $table->string('normalized_part')->index();
+            $table->string('item_name')->nullable();
+            $table->string('status', 20)->default('unavailable')->index(); // available | unavailable
+            $table->integer('requested_qty')->default(1);
+            $table->integer('available_qty')->default(0);
+            $table->decimal('price', 12, 2)->nullable();
+            $table->string('source', 20)->default('text'); // text | excel
+            $table->string('inquiry_date', 15)->nullable()->index(); // YYYY-MM-DD لحساب عدم التكرار في نفس اليوم
+            $table->timestamps();
+        });
+    } else {
+        if (!Schema::hasColumn('whatsapp_inquiry_logs', 'inquiry_date')) {
+            Schema::table('whatsapp_inquiry_logs', function (Blueprint $table) {
+                $table->string('inquiry_date', 15)->nullable()->index();
+            });
+        }
+    }
+
+    // ترقية جدول قلب النظام (master_items)
     if (Schema::hasTable('master_items')) {
         if (!Schema::hasColumn('master_items', 'compatible_cars')) {
             Schema::table('master_items', function (Blueprint $table) {
@@ -72,7 +142,7 @@ try {
         }
     }
 
-    // جداول الاستيراد الذكي في الخلفية ونقطة الاسترجاع الفورية (Rollback Snapshots)
+    // جداول الاستيراد الذكي في الخلفية ونقطة الاسترجاع الفورية
     if (!Schema::hasTable('excel_import_jobs')) {
         Schema::create('excel_import_jobs', function (Blueprint $table) {
             $table->id();
@@ -102,7 +172,6 @@ try {
         });
     }
 
-    // ضمان ربط حساب الأدمن برقم الجوال 0556666037
     if (Schema::hasTable('users')) {
         $adminUser = DB::table('users')->where('role', 'admin')->first();
         if ($adminUser && empty($adminUser->phone)) {
@@ -110,7 +179,7 @@ try {
         }
     }
 } catch (\Throwable $e) {
-    // تجاهل أي خطأ في قاعدة البيانات أثناء بناء الحاوية في Docker
+    // تجاهل أي خطأ في قاعدة البيانات أثناء بناء الحاوية
 }
 
 /*
@@ -119,9 +188,6 @@ try {
 |--------------------------------------------------------------------------
 */
 
-/**
- * تنسيق رقم الجوال بالصيغة الدولية الموحدة +966
- */
 function formatSaudiPhoneIntl($phone): string {
     $digits = preg_replace('/\D/', '', (string) $phone);
     if (str_starts_with($digits, '966')) {
@@ -136,9 +202,6 @@ function formatSaudiPhoneIntl($phone): string {
     return (string) $phone;
 }
 
-/**
- * توحيد صيغة الرقم للمقارنة في الواتساب (تزيل + و 0 البادئة وتوحد 966)
- */
 function normalizeWhatsappDigits(string $phone): string {
     $digits = preg_replace('/@.*$/', '', $phone);
     $digits = preg_replace('/\D/', '', $digits);
@@ -153,18 +216,12 @@ function normalizeWhatsappDigits(string $phone): string {
     return $digits;
 }
 
-/**
- * تحويل الأرقام العربية/الفارسية إلى إنجليزية
- */
 function normalizeArabicDigits(string $str): string {
     $arabic  = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩','۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'];
     $english = ['0','1','2','3','4','5','6','7','8','9','0','1','2','3','4','5','6','7','8','9'];
     return str_replace($arabic, $english, $str);
 }
 
-/**
- * توحيد الحروف العربية (الألف والهمزات والتاء المربوطة والياء والتشكيل)
- */
 function normalizeArabicSpelling(string $str): string {
     $str = normalizeArabicDigits(trim($str));
     $str = preg_replace('/[\x{064B}-\x{065F}\x{0670}\x{0640}]/u', '', $str);
@@ -173,6 +230,11 @@ function normalizeArabicSpelling(string $str): string {
     $str = str_replace(['ى', 'ئ'], 'ي', $str);
     $str = str_replace('ؤ', 'و', $str);
     return mb_strtolower(trim($str));
+}
+
+function normalizePartNumberClean(string $partNumber): string {
+    $norm = normalizeArabicDigits(strtoupper(trim($partNumber)));
+    return preg_replace('/[^A-Z0-9]/', '', $norm);
 }
 
 function replaceWholeWordArabicSafe(string $subject, string $search): string {
@@ -201,9 +263,6 @@ function containsWholeWordArabicSafe(string $subject, string $search): bool {
 |--------------------------------------------------------------------------
 */
 
-/**
- * دالة التحليل والربط بقلب النظام (تحديث بيانات الصنف والسيارات المتوافقة لنفس الرقم الموحد)
- */
 function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId = null): void {
     $cleanNumber = strtoupper(trim($itemNumber));
     $cleanName   = normalizeArabicDigits(trim($itemName));
@@ -214,14 +273,16 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     $detectedCategories = [];
     $detectedYearsList  = [];
 
-    $carsList = DB::table('cars')->get();
+    $carsList = Schema::hasTable('cars') ? DB::table('cars')->get() : collect();
 
     foreach ($carsList as $car) {
         if (containsWholeWordArabicSafe($cleanName, $car->car_name)) {
             $detectedCarsList[]   = $car->car_name;
             $detectedCategories[] = $car->category;
         }
-        $aliases = DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray();
+        $aliases = Schema::hasTable('car_aliases')
+            ? DB::table('car_aliases')->where('car_id', $car->id)->pluck('alias')->toArray()
+            : [];
         foreach ($aliases as $alias) {
             if ($alias !== '' && containsWholeWordArabicSafe($cleanName, $alias)) {
                 $detectedCarsList[]   = $car->car_name;
@@ -233,7 +294,9 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     $detectedCarsList   = array_values(array_unique(array_filter($detectedCarsList)));
     $detectedCategories = array_values(array_unique(array_filter($detectedCategories)));
 
-    $patterns = DB::table('year_patterns')->pluck('pattern_example')->toArray();
+    $patterns = Schema::hasTable('year_patterns')
+        ? DB::table('year_patterns')->pluck('pattern_example')->toArray()
+        : [];
     foreach ($patterns as $pattern) {
         $normP = normalizeArabicDigits(trim($pattern));
         if ($normP !== '' && containsWholeWordArabicSafe($cleanName, $normP)) {
@@ -330,9 +393,6 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
     }
 }
 
-/**
- * دالة تنظيف وتوحيد المخزون وقلب النظام (تمنع تضخم الكميات وتحذف الأصناف اليتيمة والمكررة)
- */
 function cleanupAndNormalizeInventoryData(): void {
     $validUserIds = DB::table('users')->pluck('id')->toArray();
     if (!empty($validUserIds)) {
@@ -369,9 +429,6 @@ function cleanupAndNormalizeInventoryData(): void {
     }
 }
 
-/**
- * التعرف الذكي التلقائي على أعمدة ملف الإكسل (Smart Column Mapping)
- */
 function detectSmartExcelColumns(array $headerRow): array {
     $mapping = [
         'item_number' => null,
@@ -380,9 +437,9 @@ function detectSmartExcelColumns(array $headerRow): array {
         'price'       => null,
     ];
 
-    $numberAliases = ['item_number', 'part_number', 'part_no', 'partno', 'code', 'sku', 'number', 'id', 'رقم الصنف', 'رقم القطعة', 'رقم القطعه', 'كود الصنف', 'كود', 'الرقم', 'رقم'];
+    $numberAliases = ['item_number', 'part_number', 'part_no', 'partno', 'code', 'sku', 'number', 'id', 'oem', 'رقم الصنف', 'رقم القطعة', 'رقم القطعه', 'كود الصنف', 'كود', 'الرقم', 'رقم', 'ارقام الاصناف', 'أرقام الأصناف'];
     $nameAliases   = ['item_name', 'part_name', 'description', 'name', 'title', 'item', 'اسم الصنف', 'اسم القطعة', 'اسم القطعه', 'البيان', 'الوصف', 'الصنف', 'الاسم', 'بيان الصنف'];
-    $qtyAliases    = ['quantity', 'qty', 'stock', 'balance', 'count', 'avail', 'الكمية', 'الكميه', 'الرصيد', 'العدد', 'المتوفر', 'كمية', 'رصيد'];
+    $qtyAliases    = ['quantity', 'qty', 'stock', 'balance', 'count', 'avail', 'order_qty', 'requested_qty', 'الكمية', 'الكميه', 'الرصيد', 'العدد', 'المتوفر', 'كمية', 'رصيد', 'الكمية المطلوبة', 'المطلوب'];
     $priceAliases  = ['price', 'cost', 'rate', 'amount', 'unit_price', 'selling_price', 'السعر', 'سعر البيع', 'القيمة', 'القيمه', 'سعر الوحدة', 'سعر', 'التكلفة'];
 
     foreach ($headerRow as $colIndex => $colValue) {
@@ -432,9 +489,85 @@ function detectSmartExcelColumns(array $headerRow): array {
     return $mapping;
 }
 
-/**
- * استخراج قيمة الخلية من السطر بناءً على الربط الذكي للأعمدة
- */
+function detectCustomerInquiryExcelColumns(array $rows): array {
+    $partCol = null;
+    $qtyCol  = null;
+    $startRowIndex = 0;
+
+    $numberAliases = ['item_number', 'part_number', 'part_no', 'partno', 'code', 'sku', 'number', 'oem', 'رقم الصنف', 'رقم القطعة', 'رقم القطعه', 'كود الصنف', 'كود', 'الرقم', 'رقم', 'ارقام', 'أرقام'];
+    $qtyAliases    = ['quantity', 'qty', 'count', 'order', 'req', 'الكمية', 'الكميه', 'العدد', 'كمية', 'كميه', 'مطلوب', 'المطلوب', 'الكمية المطلوبة'];
+
+    $firstRow = $rows[0] ?? [];
+    if (is_array($firstRow)) {
+        foreach ($firstRow as $colIdx => $val) {
+            $cleanVal = normalizeArabicSpelling(preg_replace('/[\s_\-\.]+/u', ' ', trim((string) $val)));
+            $rawLower = strtolower(trim((string) $val));
+            if ($cleanVal === '') continue;
+
+            if ($partCol === null) {
+                foreach ($numberAliases as $alias) {
+                    if ($cleanVal === normalizeArabicSpelling($alias) || $rawLower === $alias || str_contains($cleanVal, normalizeArabicSpelling($alias))) {
+                        $partCol = $colIdx;
+                        $startRowIndex = 1;
+                        break;
+                    }
+                }
+            }
+            if ($qtyCol === null) {
+                foreach ($qtyAliases as $alias) {
+                    if ($cleanVal === normalizeArabicSpelling($alias) || $rawLower === $alias || str_contains($cleanVal, normalizeArabicSpelling($alias))) {
+                        $qtyCol = $colIdx;
+                        $startRowIndex = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if ($partCol === null) {
+        $colScoresPart = [];
+        $colScoresQty  = [];
+        $sampleRows = array_slice($rows, 0, 10);
+
+        foreach ($sampleRows as $rIdx => $r) {
+            if (!is_array($r)) continue;
+            foreach ($r as $cIdx => $cell) {
+                $cellStr = normalizeArabicDigits(strtoupper(trim((string) $cell)));
+                if ($cellStr === '') continue;
+
+                if (strlen($cellStr) >= 4 && preg_match('/^[A-Z0-9\-]+$/', $cellStr) && preg_match('/\d/', $cellStr)) {
+                    $colScoresPart[$cIdx] = ($colScoresPart[$cIdx] ?? 0) + 1;
+                } elseif (preg_match('/^\d{1,4}$/', $cellStr) && (int) $cellStr > 0 && (int) $cellStr <= 1000) {
+                    $colScoresQty[$cIdx] = ($colScoresQty[$cIdx] ?? 0) + 1;
+                }
+            }
+        }
+
+        if (!empty($colScoresPart)) {
+            arsort($colScoresPart);
+            $partCol = array_key_first($colScoresPart);
+        } else {
+            $keys = is_array($firstRow) ? array_keys($firstRow) : [0];
+            $partCol = $keys[0] ?? 0;
+        }
+
+        if ($qtyCol === null && !empty($colScoresQty)) {
+            unset($colScoresQty[$partCol]);
+            if (!empty($colScoresQty)) {
+                arsort($colScoresQty);
+                $qtyCol = array_key_first($colScoresQty);
+            }
+        }
+    }
+
+    return [
+        'part_col'  => $partCol,
+        'qty_col'   => $qtyCol,
+        'start_row' => $startRowIndex,
+    ];
+}
+
 function extractRowMappedValue(array $row, $mappedKey, string $fieldName, int $fallbackPos) {
     if ($mappedKey !== null && array_key_exists($mappedKey, $row)) {
         return $row[$mappedKey];
@@ -446,9 +579,6 @@ function extractRowMappedValue(array $row, $mappedKey, string $fieldName, int $f
     return $values[$fallbackPos] ?? null;
 }
 
-/**
- * إنشاء نقطة استرجاع فورية (One-Click Rollback Snapshot) قبل بدء الاستيراد
- */
 function createInventoryRollbackSnapshot(int $userId, ?string $label = null): int {
     $oldSnapshots = DB::table('inventory_snapshots')
         ->where('user_id', $userId)
@@ -478,9 +608,6 @@ function createInventoryRollbackSnapshot(int $userId, ?string $label = null): in
     ]);
 }
 
-/**
- * استعادة نقطة الاسترجاع الفورية بضغطة زر (One-Click Rollback Restore)
- */
 function restoreInventoryRollbackSnapshot(int $userId, ?int $snapshotId = null): array {
     $query = DB::table('inventory_snapshots')->where('user_id', $userId);
     if ($snapshotId !== null) {
@@ -543,18 +670,17 @@ function restoreInventoryRollbackSnapshot(int $userId, ?int $snapshotId = null):
     }
 }
 
-/**
- * تحميل قاموس السيارات والأنماط في الذاكرة العشوائية (RAM Cache) لسرعة فائقة أثناء الاستيراد الجماعي
- */
 function buildMasterDictionaryRamCache(): array {
-    $cars    = DB::table('cars')->get()->toArray();
-    $aliases = DB::table('car_aliases')->get()->groupBy('car_id')->toArray();
-    $patterns = DB::table('year_patterns')
-        ->pluck('pattern_example')
-        ->map(fn($p) => normalizeArabicDigits(trim((string) $p)))
-        ->filter()
-        ->values()
-        ->toArray();
+    $cars     = Schema::hasTable('cars') ? DB::table('cars')->get()->toArray() : [];
+    $aliases  = Schema::hasTable('car_aliases') ? DB::table('car_aliases')->get()->groupBy('car_id')->toArray() : [];
+    $patterns = Schema::hasTable('year_patterns')
+        ? DB::table('year_patterns')
+            ->pluck('pattern_example')
+            ->map(fn($p) => normalizeArabicDigits(trim((string) $p)))
+            ->filter()
+            ->values()
+            ->toArray()
+        : [];
 
     $allAliases = [];
     foreach ($cars as $car) {
@@ -575,9 +701,6 @@ function buildMasterDictionaryRamCache(): array {
     ];
 }
 
-/**
- * تحليل دفعة كاملة من الأصناف وحفظها وإرسالها لقلب النظام في الذاكرة (Bulk Upsert & Sync)
- */
 function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCache = null, ?array $columnMapping = null): array {
     if (empty($rows)) {
         return ['processed' => 0, 'imported' => 0, 'updated' => 0];
@@ -793,9 +916,6 @@ function processBulkInventoryChunkFast(array $rows, int $userId, ?array $ramCach
     ];
 }
 
-/**
- * قراءة ملف الإكسل أو CSV وتحويله إلى مصفوفة أسطر بسرعة عالية
- */
 function parseUploadedSpreadsheetFileRows(string $filePath): array {
     if (!file_exists($filePath)) {
         return [];
@@ -834,9 +954,6 @@ function parseUploadedSpreadsheetFileRows(string $filePath): array {
     return [];
 }
 
-/**
- * تنفيذ مهمة الاستيراد في الخلفية بشكل كامل ومستقل عن الجلسة والمتصفح
- */
 function runBackgroundImportJobWorker(int $jobId): void {
     @ignore_user_abort(true);
     @set_time_limit(0);
@@ -925,65 +1042,254 @@ function syncAllExistingItemsToCore(): void {
 
 /*
 |--------------------------------------------------------------------------
-| 4. محرك استخراج أرقام الأصناف من رسائل الواتساب (Part Number Extraction Only)
+| 4. محرك استخراج أرقام الأصناف والكميات من رسائل الواتساب وملفات الإكسل
 |--------------------------------------------------------------------------
 */
 
-/**
- * استخراج أرقام القطع (Part Numbers) فقط من رسالة العميل وتجاهل أي أسماء أو دردشة
- */
-function extractPartNumbersFromWhatsappText(string $text, ?int $ownerUserId = null): array {
+function findExactItemIgnoringDashes(int $ownerUserId, string $partNumber, bool $onlyPositiveQty = false) {
+    $rawUpper    = strtoupper(trim($partNumber));
+    $cleanNoDash = normalizePartNumberClean($rawUpper);
+
+    if ($cleanNoDash === '') {
+        return null;
+    }
+
+    return Item::where('user_id', $ownerUserId)
+        ->when($onlyPositiveQty, fn($q) => $q->where('quantity', '>', 0))
+        ->where(function ($q) use ($rawUpper, $cleanNoDash) {
+            $q->where('item_number', $rawUpper)
+              ->orWhere(DB::raw("UPPER(REPLACE(REPLACE(item_number, '-', ''), ' ', ''))"), $cleanNoDash);
+        })
+        ->first();
+}
+
+function extractPartNumbersWithQuantitiesFromText(string $text, ?int $ownerUserId = null): array {
     $normText = normalizeArabicDigits(trim($text));
     if ($normText === '') {
         return [];
     }
 
-    $extractedPartNumbers = [];
+    $results = [];
+    $lines   = preg_split('/[\r\n]+/', $normText);
 
-    // 1. استخراج الأرقام القياسية التي تحتوي على شرطة مثل (04465-0K380 أو 90915-YZZD2)
-    if (preg_match_all('/\b[A-Za-z0-9]{2,}[\-][A-Za-z0-9\-]{2,}\b/u', $normText, $pm)) {
-        foreach ($pm[0] as $partNum) {
-            if (!preg_match('/^(?:19|20)?\d{2}[\-](?:19|20)?\d{2}$/', $partNum)) {
-                $extractedPartNumbers[] = strtoupper(trim($partNum));
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+
+        $lineParts = [];
+
+        if (preg_match_all('/\b[A-Za-z0-9]{2,}[\-][A-Za-z0-9\-]{2,}\b/u', $line, $pm)) {
+            foreach ($pm[0] as $partNum) {
+                if (!preg_match('/^(?:19|20)?\d{2}[\-](?:19|20)?\d{2}$/', $partNum)) {
+                    $lineParts[] = strtoupper(trim($partNum));
+                }
+            }
+        }
+
+        $tokens = preg_split('/[\s,،\t:;\/\|\(\)\[\]]+/u', $line, -1, PREG_SPLIT_NO_EMPTY);
+        foreach ($tokens as $tk) {
+            $cleanTk = strtoupper(trim($tk, '-_*.،,؟?!: '));
+            if (strlen($cleanTk) < 4) continue;
+
+            $isStandaloneYear = (bool) preg_match('/^(19[7-9]\d|20[0-3]\d)$/', $cleanTk);
+
+            if (preg_match('/^[A-Z0-9\-]+$/', $cleanTk) && preg_match('/\d/', $cleanTk)) {
+                $cleanNoDash = normalizePartNumberClean($cleanTk);
+
+                $existsInDb = DB::table('items')
+                    ->when($ownerUserId, fn($q) => $q->where('user_id', $ownerUserId))
+                    ->where(function ($q) use ($cleanTk, $cleanNoDash) {
+                        $q->where('item_number', $cleanTk)
+                          ->orWhere(DB::raw("UPPER(REPLACE(REPLACE(item_number, '-', ''), ' ', ''))"), $cleanNoDash);
+                    })
+                    ->exists();
+
+                if ($existsInDb) {
+                    $lineParts[] = $cleanTk;
+                } elseif (!$isStandaloneYear && strlen($cleanTk) >= 5) {
+                    $lineParts[] = $cleanTk;
+                }
+            }
+        }
+
+        $lineParts = array_values(array_unique($lineParts));
+        if (empty($lineParts)) continue;
+
+        $detectedLineQty = 1;
+        if (count($lineParts) === 1) {
+            $singlePart = $lineParts[0];
+            $lineWithoutPart = str_ireplace($singlePart, ' ', $line);
+            if (preg_match('/(?:[\*xX×=]|كميه|كمية|عدد|حبه|حبة|طقم|قطعه|قطعة)\s*(\d{1,4})\b/u', $lineWithoutPart, $qm)) {
+                $detectedLineQty = max(1, (int) $qm[1]);
+            } elseif (preg_match('/\b(\d{1,3})\s*(?:حبه|حبة|طقم|قطعه|قطعة|حبات)\b/u', $lineWithoutPart, $qm2)) {
+                $detectedLineQty = max(1, (int) $qm2[1]);
+            } elseif (preg_match('/^\s*(\d{1,3})\s*$/', trim($lineWithoutPart, ' -:*xX×=،,'), $qm3)) {
+                $detectedLineQty = max(1, (int) $qm3[1]);
+            }
+        }
+
+        foreach ($lineParts as $pNum) {
+            $normKey = normalizePartNumberClean($pNum);
+            if ($normKey === '') continue;
+
+            if (!isset($results[$normKey])) {
+                $results[$normKey] = [
+                    'part_number'   => $pNum,
+                    'requested_qty' => $detectedLineQty,
+                ];
+            } else {
+                $results[$normKey]['requested_qty'] = max($results[$normKey]['requested_qty'], $detectedLineQty);
             }
         }
     }
 
-    // 2. فحص الكلمات/الأكواد المفردة التي تحتوي على أرقام وحروف أو أرقام صافية (بطول 4 خانات فأكثر)
-    $tokens = preg_split('/[\s,،\n\r\t:;\/\|\(\)\[\]]+/u', $normText, -1, PREG_SPLIT_NO_EMPTY);
-    foreach ($tokens as $tk) {
-        $cleanTk = strtoupper(trim($tk, '-_*.،,؟?!: '));
-        if (strlen($cleanTk) < 4) {
-            continue;
-        }
+    return array_values($results);
+}
 
-        // تجاهل السنوات الميلادية المفردة مثل 2020 أو 2025 إلا إذا كانت مسجلة فعلياً كرقم صنف في المخزون
-        $isStandaloneYear = (bool) preg_match('/^(19[7-9]\d|20[0-3]\d)$/', $cleanTk);
+function extractPartNumbersFromWhatsappText(string $text, ?int $ownerUserId = null): array {
+    $items = extractPartNumbersWithQuantitiesFromText($text, $ownerUserId);
+    return array_values(array_map(fn($i) => $i['part_number'], $items));
+}
 
-        // يجب أن يكون الكود مكوناً من حروف إنجليزية وأرقام وشرطات فقط ويحتوي على رقم واحد على الأقل
-        if (preg_match('/^[A-Z0-9\-]+$/', $cleanTk) && preg_match('/\d/', $cleanTk)) {
-            $cleanNoDash = str_replace('-', '', $cleanTk);
+function extractExcelItemsFromWhatsappPayload(array $payload): array {
+    $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
 
-            $existsInDb = DB::table('items')
-                ->when($ownerUserId, function ($q) use ($ownerUserId) {
-                    return $q->where('user_id', $ownerUserId);
-                })
-                ->where(function ($q) use ($cleanTk, $cleanNoDash) {
-                    $q->where('item_number', $cleanTk)
-                      ->orWhere(DB::raw("REPLACE(item_number, '-', '')"), $cleanNoDash);
-                })
-                ->exists();
+    $fileName = data_get($payload, 'data.message.documentMessage.fileName')
+             ?? data_get($payload, 'data.message.documentWithCaptionMessage.message.documentMessage.fileName')
+             ?? data_get($payload, 'data.document.fileName')
+             ?? data_get($payload, 'data.fileName')
+             ?? data_get($payload, 'data.file_name')
+             ?? data_get($payload, 'data.filename')
+             ?? data_get($payload, 'fileName')
+             ?? data_get($payload, 'filename')
+             ?? '';
 
-            if ($existsInDb) {
-                $extractedPartNumbers[] = $cleanTk;
-            } elseif (!$isStandaloneYear && strlen($cleanTk) >= 5) {
-                // إذا كتب العميل رقم قطعة غير متوفر في المخزون (طوله 5 خانات فأكثر) نسجله للرد بعدم التوفر
-                $extractedPartNumbers[] = $cleanTk;
-            }
-        }
+    $mimeType = data_get($payload, 'data.message.documentMessage.mimetype')
+             ?? data_get($payload, 'data.mimetype')
+             ?? data_get($payload, 'mimetype')
+             ?? '';
+
+    $mediaUrl = data_get($payload, 'data.media_url')
+             ?? data_get($payload, 'data.mediaUrl')
+             ?? data_get($payload, 'data.file_url')
+             ?? data_get($payload, 'data.fileUrl')
+             ?? data_get($payload, 'data.url')
+             ?? data_get($payload, 'data.document.url')
+             ?? data_get($payload, 'data.message.documentMessage.url')
+             ?? data_get($payload, 'media_url')
+             ?? data_get($payload, 'file_url')
+             ?? data_get($payload, 'url')
+             ?? '';
+
+    $base64Data = data_get($payload, 'data.base64')
+               ?? data_get($payload, 'data.media_base64')
+               ?? data_get($payload, 'data.file_base64')
+               ?? data_get($payload, 'base64')
+               ?? '';
+
+    $isExcelMime = str_contains(strtolower($mimeType), 'spreadsheet')
+                || str_contains(strtolower($mimeType), 'excel')
+                || str_contains(strtolower($mimeType), 'csv')
+                || preg_match('/\.(xlsx|xls|csv)$/i', (string) $fileName)
+                || preg_match('/\.(xlsx|xls|csv)(\?|$)/i', (string) $mediaUrl);
+
+    if (!$isExcelMime && empty($base64Data) && empty($mediaUrl)) {
+        return [];
     }
 
-    return array_values(array_unique($extractedPartNumbers));
+    if (!$isExcelMime && !preg_match('/\.(xlsx|xls|csv)/i', $rawJson)) {
+        return [];
+    }
+
+    $tempDir = storage_path('app/temp_whatsapp_excel');
+    if (!is_dir($tempDir)) {
+        @mkdir($tempDir, 0775, true);
+    }
+
+    $ext = strtolower(pathinfo((string) $fileName, PATHINFO_EXTENSION));
+    if (!in_array($ext, ['xlsx', 'xls', 'csv'], true)) {
+        $ext = str_contains(strtolower($mimeType), 'csv') ? 'csv' : 'xlsx';
+    }
+
+    $tempFile = $tempDir . DIRECTORY_SEPARATOR . 'wa_inq_' . time() . '_' . uniqid() . '.' . $ext;
+
+    try {
+        $downloaded = false;
+        if (!empty($base64Data) && is_string($base64Data)) {
+            $cleanBase64 = preg_replace('/^data:[^;]+;base64,/', '', $base64Data);
+            $decoded = base64_decode($cleanBase64, true);
+            if ($decoded !== false && strlen($decoded) > 16) {
+                file_put_contents($tempFile, $decoded);
+                $downloaded = true;
+            }
+        }
+
+        if (!$downloaded && !empty($mediaUrl) && filter_var($mediaUrl, FILTER_VALIDATE_URL)) {
+            $resp = Http::withoutVerifying()->timeout(20)->get($mediaUrl);
+            if ($resp->successful() && strlen($resp->body()) > 16) {
+                file_put_contents($tempFile, $resp->body());
+                $downloaded = true;
+            }
+        }
+
+        if (!$downloaded || !file_exists($tempFile)) {
+            return [];
+        }
+
+        $rows = parseUploadedSpreadsheetFileRows($tempFile);
+        @unlink($tempFile);
+
+        if (empty($rows)) {
+            return [];
+        }
+
+        $colInfo  = detectCustomerInquiryExcelColumns($rows);
+        $partCol  = $colInfo['part_col'];
+        $qtyCol   = $colInfo['qty_col'];
+        $startRow = $colInfo['start_row'];
+
+        $extracted = [];
+        $totalRows = count($rows);
+
+        for ($i = $startRow; $i < $totalRows; $i++) {
+            $row = $rows[$i] ?? null;
+            if (!is_array($row)) continue;
+
+            $rawPart = trim((string) ($row[$partCol] ?? ''));
+            if ($rawPart === '') continue;
+
+            $cleanPart = strtoupper(normalizeArabicDigits($rawPart));
+            $normKey   = normalizePartNumberClean($cleanPart);
+
+            if (strlen($normKey) < 4 || in_array(strtolower($cleanPart), ['item_number', 'part_number', 'code', 'sku', 'رقم الصنف', 'رقم القطعة'], true)) {
+                continue;
+            }
+
+            $reqQty = 1;
+            if ($qtyCol !== null && isset($row[$qtyCol])) {
+                $parsedQty = (int) preg_replace('/[^\d]/', '', normalizeArabicDigits((string) $row[$qtyCol]));
+                if ($parsedQty > 0) {
+                    $reqQty = $parsedQty;
+                }
+            }
+
+            if (!isset($extracted[$normKey])) {
+                $extracted[$normKey] = [
+                    'part_number'   => $cleanPart,
+                    'requested_qty' => $reqQty,
+                ];
+            } else {
+                $extracted[$normKey]['requested_qty'] += $reqQty;
+            }
+        }
+
+        return array_values($extracted);
+    } catch (\Throwable $e) {
+        if (file_exists($tempFile)) {
+            @unlink($tempFile);
+        }
+        return [];
+    }
 }
 
 /*
@@ -994,10 +1300,11 @@ function extractPartNumbersFromWhatsappText(string $text, ?int $ownerUserId = nu
 
 function getUserBotSettings(int $userId): array {
     $defaults = [
-        'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالسعر: {price} ريال",
+        'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالكمية المتوفرة: {quantity}\nالسعر: {price} ريال",
         'reply_unavailable'     => "نعتذر منك، رقم الصنف المطلوب ({part}) غير متوفر حالياً ❌",
-        'reply_quota_exceeded'  => "",
+        'reply_quota_exceeded'  => "نعتذر منك، لقد استنفدت الحد المسموح به للاستعلام الآلي.",
         'max_queries_per_phone' => "0",
+        'quota_reset_period'    => "manual",
         'allow_group_replies'   => "0",
         'whatsapp_api_url'      => "",
         'whatsapp_api_token'    => "",
@@ -1023,20 +1330,31 @@ function formatBotTemplate(string $template, array $data): string {
     }
 
     $replacements = [
-        '{item_name}'   => $data['item_name'] ?? '',
-        '{item_number}' => $data['item_number'] ?? '',
-        '{price}'       => $data['price'] ?? '',
-        '{quantity}'    => $data['quantity'] ?? '',
-        '{car}'         => $data['car'] ?? '',
-        '{category}'    => $data['category'] ?? '',
-        '{year}'        => $data['year'] ?? '',
-        '{part}'        => $data['part'] ?? '',
-        '{client_name}' => $data['client_name'] ?? '',
-        '{phone}'       => $data['phone'] ?? '',
-        '{items}'       => $data['items'] ?? '',
+        '{item_name}'     => $data['item_name'] ?? '',
+        '{item_number}'   => $data['item_number'] ?? '',
+        '{price}'         => $data['price'] ?? '',
+        '{quantity}'      => $data['quantity'] ?? '',
+        '{requested_qty}' => $data['requested_qty'] ?? '',
+        '{car}'           => $data['car'] ?? '',
+        '{category}'      => $data['category'] ?? '',
+        '{year}'          => $data['year'] ?? '',
+        '{part}'          => $data['part'] ?? '',
+        '{client_name}'   => $data['client_name'] ?? '',
+        '{phone}'         => $data['phone'] ?? '',
+        '{items}'         => $data['items'] ?? '',
     ];
 
-    return str_replace(array_keys($replacements), array_values($replacements), $template);
+    $output = str_replace(array_keys($replacements), array_values($replacements), $template);
+
+    if (($data['price'] ?? null) === '') {
+        $output = preg_replace('/^.*(?:السعر|سعر).*?:\s*(?:ريال|ر\.س|SAR)?\s*$/imu', '', $output);
+    }
+    if (($data['quantity'] ?? null) === '') {
+        $output = preg_replace('/^.*(?:الكمية|الكميه|المتوفر).*?:\s*$/imu', '', $output);
+    }
+
+    $output = preg_replace("/\n{3,}/", "\n\n", trim((string) $output));
+    return $output;
 }
 
 function resolveWebhookOwnerUserId(Request $request, array $payload): int {
@@ -1093,7 +1411,7 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
                 $headers['X-Api-Key']     = $apiToken;
             }
 
-            Http::withHeaders($headers)->withoutVerifying()->timeout(10)->post($apiUrl, [
+            Http::withHeaders($headers)->withoutVerifying()->timeout(12)->post($apiUrl, [
                 'session_id'      => $sessionId,
                 'sessionId'       => $sessionId,
                 'session'         => $sessionId,
@@ -1112,7 +1430,7 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
                 'content'         => $replyText,
             ]);
         } catch (\Throwable $e) {
-            // تجاهل أخطاء الشبكة الخارجية حتى لا يتوقف الويب هوك
+            // تجاهل أخطاء الشبكة الخارجية
         }
     }
 }
@@ -1212,9 +1530,105 @@ function detectGroupAndBroadcastStatus(array $payload): array {
     ];
 }
 
+function isWithinAllowedTimeWindow(?string $startTime, ?string $endTime): bool {
+    $start = trim((string) $startTime);
+    $end   = trim((string) $endTime);
+    if ($start === '' || $end === '') {
+        return true;
+    }
+
+    try {
+        $nowTime = Carbon::now('Asia/Riyadh')->format('H:i');
+        if ($start <= $end) {
+            return ($nowTime >= $start && $nowTime <= $end);
+        }
+        return ($nowTime >= $start || $nowTime <= $end);
+    } catch (\Throwable $e) {
+        return true;
+    }
+}
+
+function checkAndResetQuotaAutomatically(int $ownerUserId, string $phoneKey, $quotaRecord, string $resetPeriod): int {
+    if (!$quotaRecord) {
+        return 0;
+    }
+
+    $currentCount = (int) $quotaRecord->queries_count;
+    if ($resetPeriod === 'manual' || $currentCount === 0) {
+        return $currentCount;
+    }
+
+    $refDateStr = $quotaRecord->last_reset_at ?? $quotaRecord->updated_at ?? $quotaRecord->created_at;
+    if (!$refDateStr) {
+        return $currentCount;
+    }
+
+    try {
+        $refDate = Carbon::parse($refDateStr, 'Asia/Riyadh');
+        $now     = Carbon::now('Asia/Riyadh');
+        $shouldReset = false;
+
+        if ($resetPeriod === 'daily' && $refDate->diffInHours($now) >= 24) {
+            $shouldReset = true;
+        } elseif ($resetPeriod === 'monthly' && ($refDate->month !== $now->month || $refDate->year !== $now->year)) {
+            $shouldReset = true;
+        }
+
+        if ($shouldReset) {
+            DB::table('whatsapp_customer_quotas')
+                ->where('user_id', $ownerUserId)
+                ->where('phone', $phoneKey)
+                ->update([
+                    'queries_count' => 0,
+                    'last_reset_at' => now(),
+                    'updated_at'    => now(),
+                ]);
+            return 0;
+        }
+    } catch (\Throwable $e) {
+        // تجاهل الخطأ
+    }
+
+    return $currentCount;
+}
+
 /**
- * المعالج الرئيسي لرسائل الواتساب الواردة (يستعلم فقط من خلال رقم الصنف)
+ * تسجيل الاستعلام في جدول الرادار الموحد (مع حفظ تاريخ اليوم بتوقيت الرياض لمنع تكرار اليوم في العد المميز)
  */
+function recordRadarInquiryLog(
+    int $ownerUserId,
+    string $phone,
+    string $partNumber,
+    ?string $itemName,
+    string $status,
+    int $reqQty,
+    int $availQty,
+    ?float $price,
+    string $source = 'text'
+): void {
+    $normPart = normalizePartNumberClean($partNumber);
+    if ($normPart === '') return;
+
+    $todayStr = Carbon::now('Asia/Riyadh')->format('Y-m-d');
+    $now      = now();
+
+    DB::table('whatsapp_inquiry_logs')->insert([
+        'user_id'         => $ownerUserId,
+        'phone'           => $phone ?: 'محاكاة/مباشر',
+        'part_number'     => strtoupper(trim($partNumber)),
+        'normalized_part' => $normPart,
+        'item_name'       => $itemName,
+        'status'          => $status,
+        'requested_qty'   => max(1, $reqQty),
+        'available_qty'   => max(0, $availQty),
+        'price'           => $price,
+        'source'          => $source,
+        'inquiry_date'    => $todayStr,
+        'created_at'      => $now,
+        'updated_at'      => $now,
+    ]);
+}
+
 function handleWebhook(Request $request) {
     $payload   = $request->all();
     $eventType = $request->input('event', data_get($payload, 'event', 'unknown'));
@@ -1266,28 +1680,8 @@ function handleWebhook(Request $request) {
            ?? data_get($payload, 'data.contact.phone')
            ?? data_get($payload, 'data.key.remoteJid');
 
-    $messageText = data_get($payload, 'data.message_body')
-                ?? data_get($payload, 'data.text')
-                ?? data_get($payload, 'data.body')
-                ?? data_get($payload, 'data.content')
-                ?? data_get($payload, 'data.message')
-                ?? data_get($payload, 'data.message.text')
-                ?? data_get($payload, 'data.message.body')
-                ?? data_get($payload, 'data.message.content')
-                ?? data_get($payload, 'data.message.conversation')
-                ?? data_get($payload, 'data.message.extendedTextMessage.text')
-                ?? data_get($payload, 'message_body')
-                ?? data_get($payload, 'body')
-                ?? data_get($payload, 'message')
-                ?? data_get($payload, 'text')
-                ?? data_get($payload, 'content');
-
-    if (is_array($messageText)) {
-        $messageText = $messageText['text'] ?? $messageText['body'] ?? $messageText['content'] ?? $messageText['conversation'] ?? null;
-    }
-
-    if (!$sender || !$messageText || !is_string($messageText)) {
-        return response()->json(['status' => 'no_message_detected'], 200);
+    if (!$sender) {
+        return response()->json(['status' => 'no_sender_detected'], 200);
     }
 
     $rawSender = ($groupCheck['is_group'] && !empty($groupCheck['group_jid']))
@@ -1298,40 +1692,98 @@ function handleWebhook(Request $request) {
                 ? $groupCheck['group_jid']
                 : normalizeWhatsappDigits((string) $sender);
 
-    $messageText = trim($messageText);
+    $quotaPhoneKey = normalizeWhatsappDigits((string) $sender) ?: $cleanPhone;
 
-    if ($cleanPhone === '' || $messageText === '') {
-        return response()->json(['status' => 'empty'], 200);
+    if ($cleanPhone === '') {
+        return response()->json(['status' => 'empty_phone'], 200);
     }
 
-    // استخراج أرقام القطع فقط؛ إذا لم تحتوِ الرسالة على رقم قطعة يتم تجاهلها تماماً
-    $partNumbers = extractPartNumbersFromWhatsappText($messageText, $ownerUserId);
-    if (empty($partNumbers)) {
+    // 1. فحص القائمة السوداء
+    $isBlacklisted = DB::table('whatsapp_blacklist_phones')
+        ->where('user_id', $ownerUserId)
+        ->where('phone', $quotaPhoneKey)
+        ->exists();
+
+    if ($isBlacklisted) {
+        return response()->json(['status' => 'ignored_blacklisted_phone'], 200);
+    }
+
+    // 2. فحص الاستثناء والوقت المسموح
+    $whitelistRecord = DB::table('whatsapp_whitelist_phones')
+        ->where('user_id', $ownerUserId)
+        ->where('phone', $quotaPhoneKey)
+        ->first();
+
+    if ($whitelistRecord && !isWithinAllowedTimeWindow($whitelistRecord->allowed_start_time ?? null, $whitelistRecord->allowed_end_time ?? null)) {
+        return response()->json(['status' => 'ignored_outside_whitelist_allowed_hours'], 200);
+    }
+
+    // 3. فحص هل أرسل العميل ملف إكسل أو نص
+    $excelInquiries = extractExcelItemsFromWhatsappPayload($payload);
+    $isExcelSource  = !empty($excelInquiries);
+
+    if ($isExcelSource) {
+        if (!$whitelistRecord || !((bool) ($whitelistRecord->allow_excel ?? true))) {
+            return response()->json(['status' => 'ignored_excel_not_permitted_for_this_phone'], 200);
+        }
+        $requestedItems = $excelInquiries;
+    } else {
+        $messageText = data_get($payload, 'data.message_body')
+                    ?? data_get($payload, 'data.text')
+                    ?? data_get($payload, 'data.body')
+                    ?? data_get($payload, 'data.content')
+                    ?? data_get($payload, 'data.message')
+                    ?? data_get($payload, 'data.message.text')
+                    ?? data_get($payload, 'data.message.body')
+                    ?? data_get($payload, 'data.message.content')
+                    ?? data_get($payload, 'data.message.conversation')
+                    ?? data_get($payload, 'data.message.extendedTextMessage.text')
+                    ?? data_get($payload, 'message_body')
+                    ?? data_get($payload, 'body')
+                    ?? data_get($payload, 'message')
+                    ?? data_get($payload, 'text')
+                    ?? data_get($payload, 'content');
+
+        if (is_array($messageText)) {
+            $messageText = $messageText['text'] ?? $messageText['body'] ?? $messageText['content'] ?? $messageText['conversation'] ?? null;
+        }
+
+        if (!$messageText || !is_string($messageText) || trim($messageText) === '') {
+            return response()->json(['status' => 'no_message_detected'], 200);
+        }
+
+        $requestedItems = extractPartNumbersWithQuantitiesFromText(trim($messageText), $ownerUserId);
+    }
+
+    if (empty($requestedItems)) {
         return response()->json(['status' => 'ignored_no_part_number_detected'], 200);
     }
 
-    $quotaPhoneKey    = normalizeWhatsappDigits((string) $sender) ?: $cleanPhone;
+    // 4. فحص الحصة والتصفير التلقائي (كل رقم صنف = 1)
     $msgAvailable     = trim($settings['reply_available'] ?? '');
     $msgUnavailable   = trim($settings['reply_unavailable'] ?? '');
     $msgQuotaExceeded = trim($settings['reply_quota_exceeded'] ?? '');
     $maxQueriesLimit  = (int) ($settings['max_queries_per_phone'] ?? 0);
+    $resetPeriod      = $settings['quota_reset_period'] ?? 'manual';
     $sessionId        = trim($settings['whatsapp_session_id'] ?? '');
     $convId           = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
-
-    // فحص الحصة (Quota) والاستثناءات
-    $isWhitelisted = DB::table('whatsapp_whitelist_phones')
-        ->where('user_id', $ownerUserId)
-        ->where('phone', $quotaPhoneKey)
-        ->exists();
 
     $quotaRecord = DB::table('whatsapp_customer_quotas')
         ->where('user_id', $ownerUserId)
         ->where('phone', $quotaPhoneKey)
         ->first();
 
-    $currentQueriesUsed = $quotaRecord ? (int) $quotaRecord->queries_count : 0;
+    $currentQueriesUsed = checkAndResetQuotaAutomatically($ownerUserId, $quotaPhoneKey, $quotaRecord, $resetPeriod);
 
-    if (!$isWhitelisted && $maxQueriesLimit > 0 && $currentQueriesUsed >= $maxQueriesLimit) {
+    $effectiveLimit = null;
+    if ($whitelistRecord) {
+        $cQuota = (int) ($whitelistRecord->custom_quota ?? 0);
+        $effectiveLimit = $cQuota > 0 ? $cQuota : null;
+    } else {
+        $effectiveLimit = $maxQueriesLimit > 0 ? $maxQueriesLimit : null;
+    }
+
+    if ($effectiveLimit !== null && $currentQueriesUsed >= $effectiveLimit) {
         if ($msgQuotaExceeded !== '') {
             $quotaReply = formatBotTemplate($msgQuotaExceeded, [
                 'client_name' => $ownerUser->name ?? '',
@@ -1343,43 +1795,112 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_quota_exceeded'], 200);
     }
 
-    $replyBlocks           = [];
-    $unavailablePartsNames = [];
-
-    foreach ($partNumbers as $pNum) {
-        $cleanNoDash = str_replace('-', '', $pNum);
-
-        $item = Item::where('user_id', $ownerUserId)
-            ->where('quantity', '>', 0)
-            ->where(function ($q) use ($pNum, $cleanNoDash) {
-                $q->where('item_number', $pNum)
-                  ->orWhere(DB::raw("REPLACE(item_number, '-', '')"), $cleanNoDash)
-                  ->orWhere('item_number', 'like', "%{$pNum}%");
-            })
-            ->first();
-
-        if ($item) {
-            if ($msgAvailable !== '') {
-                $replyBlocks[] = formatBotTemplate($msgAvailable, [
-                    'item_name'   => $item->item_name,
-                    'item_number' => $item->item_number,
-                    'price'       => (string) $item->price,
-                    'quantity'    => (string) $item->quantity,
-                    'car'         => $item->detected_car_name ?? '',
-                    'category'    => $item->detected_category ?? '',
-                    'year'        => $item->detected_years ?? '',
-                    'part'        => $pNum,
-                    'client_name' => $ownerUser->name ?? '',
-                    'phone'       => $quotaPhoneKey,
-                    'items'       => "- {$item->item_name} (رقم: {$item->item_number}) | السعر: {$item->price} ريال",
-                ]);
-            }
-        } else {
-            $unavailablePartsNames[] = $pNum;
+    $quotaHitDuringBatch = false;
+    if ($effectiveLimit !== null) {
+        $remainingAllowance = max(0, $effectiveLimit - $currentQueriesUsed);
+        if (count($requestedItems) > $remainingAllowance) {
+            $requestedItems      = array_slice($requestedItems, 0, $remainingAllowance);
+            $quotaHitDuringBatch = true;
         }
     }
 
-    if (!empty($unavailablePartsNames) && $msgUnavailable !== '') {
+    $canShowAvailable   = $whitelistRecord ? (bool) ($whitelistRecord->allow_available ?? true) : true;
+    $canShowUnavailable = $whitelistRecord ? (bool) ($whitelistRecord->allow_unavailable ?? true) : true;
+    $canShowPrices      = $whitelistRecord ? (bool) ($whitelistRecord->allow_prices ?? true) : true;
+    $canShowQuantities  = $whitelistRecord ? (bool) ($whitelistRecord->allow_quantities ?? true) : true;
+
+    $replyBlocks           = [];
+    $unavailablePartsNames = [];
+    $countedQueries        = 0;
+    $now                   = now();
+
+    foreach ($requestedItems as $reqEntry) {
+        $pNum   = $reqEntry['part_number'];
+        $reqQty = max(1, (int) ($reqEntry['requested_qty'] ?? 1));
+        $countedQueries++;
+
+        $item = findExactItemIgnoringDashes($ownerUserId, $pNum, true);
+
+        if ($item) {
+            $stockQty     = (int) $item->quantity;
+            $fulfilledQty = ($reqQty > 1) ? min($reqQty, $stockQty) : $stockQty;
+
+            recordRadarInquiryLog(
+                $ownerUserId,
+                $quotaPhoneKey,
+                $item->item_number,
+                $item->item_name,
+                'available',
+                $reqQty,
+                $stockQty,
+                (float) $item->price,
+                $isExcelSource ? 'excel' : 'text'
+            );
+
+            if ($canShowAvailable && $msgAvailable !== '') {
+                $priceDisplay = $canShowPrices ? (string) $item->price : '';
+                $qtyDisplay   = $canShowQuantities ? (string) $fulfilledQty : '';
+
+                if ($isExcelSource) {
+                    $lineParts = ["✅ *{$item->item_number}* ({$item->item_name})"];
+                    if ($canShowQuantities) {
+                        $lineParts[] = ($reqQty > 1 && $stockQty < $reqQty)
+                            ? "المتوفر: {$fulfilledQty} من أصل {$reqQty}"
+                            : "الكمية المتوفرة: {$fulfilledQty}";
+                    }
+                    if ($canShowPrices) {
+                        $lineParts[] = "السعر: {$item->price} ريال";
+                    }
+                    $replyBlocks[] = implode(' | ', $lineParts);
+                } else {
+                    $formattedBlock = formatBotTemplate($msgAvailable, [
+                        'item_name'     => $item->item_name,
+                        'item_number'   => $item->item_number,
+                        'price'         => $priceDisplay,
+                        'quantity'      => $qtyDisplay,
+                        'requested_qty' => (string) $reqQty,
+                        'car'           => $item->detected_car_name ?? '',
+                        'category'      => $item->detected_category ?? '',
+                        'year'          => $item->detected_years ?? '',
+                        'part'          => $pNum,
+                        'client_name'   => $ownerUser->name ?? '',
+                        'phone'         => $quotaPhoneKey,
+                        'items'         => "- {$item->item_name} (رقم: {$item->item_number})"
+                            . ($canShowQuantities ? " | المتوفر: {$fulfilledQty}" : "")
+                            . ($canShowPrices ? " | السعر: {$item->price} ريال" : ""),
+                    ]);
+
+                    if ($canShowQuantities && !str_contains($msgAvailable, '{quantity}') && $reqQty > 1) {
+                        $formattedBlock .= "\nالكمية المتوفرة: {$fulfilledQty}" . ($stockQty < $reqQty ? " (من أصل {$reqQty} مطلوبة)" : "");
+                    }
+
+                    $replyBlocks[] = $formattedBlock;
+                }
+            }
+        } else {
+            recordRadarInquiryLog(
+                $ownerUserId,
+                $quotaPhoneKey,
+                $pNum,
+                null,
+                'unavailable',
+                $reqQty,
+                0,
+                null,
+                $isExcelSource ? 'excel' : 'text'
+            );
+
+            if ($canShowUnavailable) {
+                if ($isExcelSource) {
+                    $replyBlocks[] = "❌ *{$pNum}* : غير متوفر حالياً";
+                } else {
+                    $unavailablePartsNames[] = $pNum;
+                }
+            }
+        }
+    }
+
+    if (!$isExcelSource && $canShowUnavailable && !empty($unavailablePartsNames) && $msgUnavailable !== '') {
         $combinedMissing = implode(' ، ', array_unique($unavailablePartsNames));
         $replyBlocks[] = formatBotTemplate($msgUnavailable, [
             'item_name'   => $combinedMissing,
@@ -1396,30 +1917,45 @@ function handleWebhook(Request $request) {
         ]);
     }
 
+    if ($quotaHitDuringBatch && $msgQuotaExceeded !== '') {
+        $replyBlocks[] = formatBotTemplate($msgQuotaExceeded, [
+            'client_name' => $ownerUser->name ?? '',
+            'phone'       => $quotaPhoneKey,
+        ]);
+    }
+
     DB::table('whatsapp_customer_quotas')->updateOrInsert(
         ['user_id' => $ownerUserId, 'phone' => $quotaPhoneKey],
         [
-            'queries_count' => $currentQueriesUsed + 1,
-            'updated_at'    => now(),
-            'created_at'    => $quotaRecord->created_at ?? now(),
+            'queries_count' => $currentQueriesUsed + $countedQueries,
+            'last_reset_at' => $quotaRecord->last_reset_at ?? $now,
+            'updated_at'    => $now,
+            'created_at'    => $quotaRecord->created_at ?? $now,
         ]
     );
 
-    $finalDirectReply = implode("\n\n", array_values(array_unique(array_filter($replyBlocks))));
+    $separator        = $isExcelSource ? "\n" : "\n\n";
+    $finalDirectReply = implode($separator, array_values(array_filter($replyBlocks)));
+
+    if ($isExcelSource && $finalDirectReply !== '') {
+        $finalDirectReply = "📊 *نتيجة فحص ملف الإكسل ({$countedQueries} صنف):*\n\n" . $finalDirectReply;
+    }
+
     if ($finalDirectReply === '') {
-        return response()->json(['status' => 'skipped_empty_template'], 200);
+        return response()->json(['status' => 'skipped_empty_template_or_permissions'], 200);
     }
 
     sendWhatsappReplyMessage($settings, $cleanPhone, $rawSender, $convId, $finalDirectReply);
 
     return response()->json([
-        'status'     => 'success',
-        'session_id' => $sessionId,
-        'reply'      => $finalDirectReply,
-        'message'    => $finalDirectReply,
-        'text'       => $finalDirectReply,
-        'body'       => $finalDirectReply,
-        'data'       => [
+        'status'          => 'success',
+        'session_id'      => $sessionId,
+        'counted_queries' => $countedQueries,
+        'reply'           => $finalDirectReply,
+        'message'         => $finalDirectReply,
+        'text'            => $finalDirectReply,
+        'body'            => $finalDirectReply,
+        'data'            => [
             'session_id' => $sessionId,
             'reply'      => $finalDirectReply,
             'message'    => $finalDirectReply,
@@ -1430,7 +1966,309 @@ function handleWebhook(Request $request) {
 
 /*
 |--------------------------------------------------------------------------
-| 6. المسارات العامة ومسارات المصادقة (Public & Auth Routes)
+| 6. دوال بناء الصفحات المستقلة وحقن روابط القائمة الجانبية (Sidebar Navigation)
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * حقن روابط الصفحات المستقلة الجديدة في القائمة الجانبية اليمنى (Sidebar) تلقائياً في كل الصفحات:
+ * 1. رابط "🛡️ الاستثناءات والحصص" (تحت الرد الآلي مباشرة لجميع المستخدمين)
+ * 2. رابط "📡 رادار الطلبات العام" (تحت قسم المدير للأدمن فقط)
+ */
+function injectSidebarNavigationLinks(string $html): string {
+    $isAdmin   = auth()->check() && auth()->user()->role === 'admin';
+    $quotasUrl = route('whatsapp.quotas.page');
+    $radarUrl  = $isAdmin ? route('admin.radar.page') : '';
+    $currPath  = request()->path();
+
+    $isQuotasActive = str_contains($currPath, 'whatsapp-quotas') ? 'true' : 'false';
+    $isRadarActive  = str_contains($currPath, 'admin-radar') ? 'true' : 'false';
+    $isAdminJs      = $isAdmin ? 'true' : 'false';
+
+    $navScript = <<<HTML
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const aiLink = document.querySelector('a[href*="ai-whatsapp"]');
+    if (aiLink && !document.getElementById('epc-nav-quotas')) {
+        const quotasLink = aiLink.cloneNode(true);
+        quotasLink.id = 'epc-nav-quotas';
+        quotasLink.href = '{$quotasUrl}';
+        quotasLink.innerHTML = '🛡️ <span style="margin-right:8px;">الاستثناءات والحصص</span>';
+
+        if ({$isQuotasActive}) {
+            quotasLink.style.background = '#16a34a';
+            quotasLink.style.color = '#ffffff';
+            quotasLink.style.borderRadius = '10px';
+            aiLink.style.background = 'transparent';
+        } else {
+            quotasLink.style.background = 'transparent';
+            quotasLink.style.color = '#cbd5e1';
+            quotasLink.classList.remove('bg-emerald-500', 'bg-green-500', 'bg-green-600', 'text-white', 'active');
+        }
+
+        if (aiLink.parentNode && aiLink.parentNode.tagName === 'LI') {
+            const li = aiLink.parentNode.cloneNode(false);
+            li.appendChild(quotasLink);
+            aiLink.parentNode.parentNode.insertBefore(li, aiLink.parentNode.nextSibling);
+        } else if (aiLink.parentNode) {
+            aiLink.parentNode.insertBefore(quotasLink, aiLink.nextSibling);
+        }
+    }
+
+    if ({$isAdminJs} && !document.getElementById('epc-nav-radar')) {
+        const masterLink = document.querySelector('a[href*="master-catalog"]') || document.querySelector('a[href*="clients"]') || aiLink;
+        if (masterLink) {
+            const radarLink = masterLink.cloneNode(true);
+            radarLink.id = 'epc-nav-radar';
+            radarLink.href = '{$radarUrl}';
+            radarLink.innerHTML = '📡 <span style="margin-right:8px;">رادار الطلبات العام</span>';
+
+            if ({$isRadarActive}) {
+                radarLink.style.background = '#16a34a';
+                radarLink.style.color = '#ffffff';
+                radarLink.style.borderRadius = '10px';
+                if (aiLink) aiLink.style.background = 'transparent';
+            } else {
+                radarLink.style.background = 'transparent';
+                radarLink.style.color = '#cbd5e1';
+                radarLink.classList.remove('bg-emerald-500', 'bg-green-500', 'bg-green-600', 'text-white', 'active');
+            }
+
+            if (masterLink.parentNode && masterLink.parentNode.tagName === 'LI') {
+                const li = masterLink.parentNode.cloneNode(false);
+                li.appendChild(radarLink);
+                masterLink.parentNode.parentNode.insertBefore(li, masterLink.parentNode.nextSibling);
+            } else if (masterLink.parentNode) {
+                masterLink.parentNode.insertBefore(radarLink, masterLink.nextSibling);
+            }
+        }
+    }
+});
+</script>
+HTML;
+
+    if (str_contains($html, '</body>')) {
+        return str_replace('</body>', $navScript . "\n</body>", $html);
+    }
+    return $html . $navScript;
+}
+
+/**
+ * استبدال محتوى منطقة العمل الرئيسية داخل القالب الأساسي لإنشاء صفحة مستقلة نظيفة تماماً بدون "صفحة فوق صفحة"
+ */
+function renderStandalonePageInsideMainLayout(string $pageTitle, string $innerHtmlContent): string {
+    $baseHtml = view('pages.second', [
+        'customerMessage' => '',
+        'matchedItems'    => collect(),
+        'botSettings'     => getUserBotSettings(auth()->id()),
+        'whitelistPhones' => collect(),
+        'customerQuotas'  => collect(),
+    ])->render();
+
+    $payloadJson  = json_encode($innerHtmlContent, JSON_UNESCAPED_UNICODE);
+    $titleJson    = json_encode($pageTitle, JSON_UNESCAPED_UNICODE);
+
+    $replaceScript = <<<HTML
+<style id="epc-hide-until-ready">
+    main, [role="main"], .main-content { opacity: 0; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    document.title = {$titleJson};
+    const customHtml = {$payloadJson};
+
+    let container = document.querySelector('main') || document.querySelector('[role="main"]') || document.querySelector('.main-content');
+    if (!container) {
+        const formEl = document.querySelector('form[action*="ai-whatsapp"]');
+        if (formEl) {
+            let p = formEl.parentElement;
+            while (p && p.parentElement && p.parentElement !== document.body && getComputedStyle(p.parentElement).display !== 'flex') {
+                p = p.parentElement;
+            }
+            container = p;
+        }
+    }
+
+    if (container) {
+        container.innerHTML = customHtml;
+        container.style.opacity = '1';
+    }
+
+    const hideStyle = document.getElementById('epc-hide-until-ready');
+    if (hideStyle) hideStyle.remove();
+});
+</script>
+HTML;
+
+    $baseHtml = injectSidebarNavigationLinks($baseHtml);
+    if (str_contains($baseHtml, '</body>')) {
+        return str_replace('</body>', $replaceScript . "\n</body>", $baseHtml);
+    }
+    return $baseHtml . $replaceScript;
+}
+
+/**
+ * حقن البحث المباشر بدون إنتر + الفلاتر السريعة + روابط القائمة الجانبية في صفحة المخزون
+ */
+function injectInventoryLiveSearchAndFiltersScript(string $html): string {
+    $currentFilter = request()->query('stock_filter', 'all');
+
+    $injectedAssets = <<<HTML
+<!-- EPC Live Search & Smart Stock Filters -->
+<style>
+    .epc-stock-filters-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 12px 0;
+        align-items: center;
+    }
+    .epc-filter-btn {
+        padding: 6px 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid #cbd5e1;
+        background: #ffffff;
+        color: #334155;
+        transition: all 0.15s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .epc-filter-btn:hover {
+        background: #f1f5f9;
+        border-color: #94a3b8;
+    }
+    .epc-filter-btn.active {
+        background: #2563eb;
+        color: #ffffff;
+        border-color: #2563eb;
+    }
+    .epc-live-indicator {
+        font-size: 12px;
+        color: #16a34a;
+        font-weight: 600;
+        margin-right: 8px;
+        display: none;
+    }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const searchInput = document.querySelector('input[name="search"], input[type="search"], #search-input, #inventory-search');
+    if (!searchInput) return;
+
+    let currentStockFilter = '{$currentFilter}';
+    let debounceTimer = null;
+    let activeController = null;
+
+    const filterBar = document.createElement('div');
+    filterBar.className = 'epc-stock-filters-bar';
+    filterBar.innerHTML = `
+        <span style="font-size:13px;font-weight:700;color:#475569;">فلتر سريع:</span>
+        <button type="button" class="epc-filter-btn \${currentStockFilter === 'all' ? 'active' : ''}" data-filter="all">📦 الكل</button>
+        <button type="button" class="epc-filter-btn \${currentStockFilter === 'available' ? 'active' : ''}" data-filter="available">✅ المتوفر (> 0)</button>
+        <button type="button" class="epc-filter-btn \${currentStockFilter === 'out' ? 'active' : ''}" data-filter="out">❌ المنتهي (0)</button>
+        <button type="button" class="epc-filter-btn \${currentStockFilter === 'low' ? 'active' : ''}" data-filter="low">⚠️ منخفض (< 3)</button>
+        <button type="button" class="epc-filter-btn \${currentStockFilter === 'no_price' ? 'active' : ''}" data-filter="no_price">💰 بدون سعر (0)</button>
+        <span id="epc-live-loading" class="epc-live-indicator">⏳ جاري البحث الفوري...</span>
+    `;
+
+    const searchForm = searchInput.closest('form');
+    if (searchForm && searchForm.parentNode) {
+        searchForm.parentNode.insertBefore(filterBar, searchForm.nextSibling);
+        searchForm.addEventListener('submit', function (e) {
+            e.preventDefault();
+            triggerLiveInventorySearch();
+        });
+    } else if (searchInput.parentNode) {
+        searchInput.parentNode.appendChild(filterBar);
+    }
+
+    const loadingBadge = document.getElementById('epc-live-loading');
+
+    function triggerLiveInventorySearch() {
+        const queryVal = searchInput.value.trim();
+        const url = new URL(window.location.href);
+        url.searchParams.set('search', queryVal);
+        url.searchParams.set('stock_filter', currentStockFilter);
+        url.searchParams.delete('page');
+
+        window.history.replaceState({}, '', url.toString());
+
+        if (activeController) {
+            activeController.abort();
+        }
+        activeController = new AbortController();
+
+        if (loadingBadge) loadingBadge.style.display = 'inline-block';
+
+        fetch(url.toString(), {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json, text/html'
+            },
+            signal: activeController.signal
+        })
+        .then(res => {
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                return res.json().then(data => ({ type: 'json', data }));
+            }
+            return res.text().then(text => ({ type: 'html', text }));
+        })
+        .then(result => {
+            if (loadingBadge) loadingBadge.style.display = 'none';
+            const currentTbody = document.querySelector('table tbody');
+            if (!currentTbody) return;
+
+            if (result.type === 'json' && result.data && typeof result.data.html === 'string') {
+                currentTbody.innerHTML = result.data.html;
+            } else if (result.type === 'html') {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(result.text, 'text/html');
+                const newTbody = doc.querySelector('table tbody');
+                if (newTbody) {
+                    currentTbody.innerHTML = newTbody.innerHTML;
+                }
+            }
+        })
+        .catch(err => {
+            if (err.name !== 'AbortError' && loadingBadge) {
+                loadingBadge.style.display = 'none';
+            }
+        });
+    }
+
+    searchInput.addEventListener('input', function () {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(triggerLiveInventorySearch, 220);
+    });
+
+    filterBar.querySelectorAll('.epc-filter-btn').forEach(btn => {
+        btn.addEventListener('click', function () {
+            filterBar.querySelectorAll('.epc-filter-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            currentStockFilter = this.getAttribute('data-filter') || 'all';
+            triggerLiveInventorySearch();
+        });
+    });
+});
+</script>
+HTML;
+
+    $html = injectSidebarNavigationLinks($html);
+    if (str_contains($html, '</body>')) {
+        return str_replace('</body>', $injectedAssets . "\n</body>", $html);
+    }
+    return $html . $injectedAssets;
+}
+
+/*
+|--------------------------------------------------------------------------
+| 7. المسارات العامة ومسارات المصادقة (Public & Auth Routes)
 |--------------------------------------------------------------------------
 */
 
@@ -1452,7 +2290,6 @@ Route::post('/api/webhook/receiver/', function (Request $r) {
 
 require __DIR__ . '/auth.php';
 
-// تسجيل الدخول الموحد (للأدمن والعملاء برقم الجوال وكود التحقق، مع عزل واتساب كل حساب على حدة)
 Route::post('/login', function (Request $request) {
     $loginInput = trim((string) $request->input('login', ''));
     $password   = trim((string) $request->input('password', ''));
@@ -1528,13 +2365,17 @@ Route::post('/login', function (Request $request) {
 
 /*
 |--------------------------------------------------------------------------
-| 7. مسارات النظام المحمية بتسجيل الدخول (Authenticated Routes)
+| 8. مسارات النظام المحمية بتسجيل الدخول (Authenticated Routes)
 |--------------------------------------------------------------------------
 */
 
 Route::middleware('auth')->group(function () {
 
-    // 1. المخزون (خاص لكل مستخدم)
+    Route::get('/cars-dictionary', function () {
+        return redirect()->route('inventory.index');
+    })->name('cars.dictionary');
+
+    // 1. المخزون الخاص
     Route::prefix('inventory')->name('inventory.')->group(function () {
         Route::get('/', function (Request $request) {
             $user         = auth()->user();
@@ -1546,25 +2387,45 @@ Route::middleware('auth')->group(function () {
 
             $query = Item::where('user_id', $targetUserId);
 
+            $stockFilter = (string) $request->query('stock_filter', 'all');
+            if ($stockFilter === 'available') {
+                $query->where('quantity', '>', 0);
+            } elseif ($stockFilter === 'out') {
+                $query->where('quantity', '<=', 0);
+            } elseif ($stockFilter === 'low') {
+                $query->where('quantity', '>', 0)->where('quantity', '<', 3);
+            } elseif ($stockFilter === 'no_price') {
+                $query->where('price', '<=', 0);
+            }
+
             if ($request->filled('search')) {
-                $s = $request->query('search');
-                $query->where(function ($q) use ($s) {
+                $s           = trim((string) $request->query('search'));
+                $cleanNoDash = normalizePartNumberClean($s);
+
+                $query->where(function ($q) use ($s, $cleanNoDash) {
                     $q->where('item_number', 'like', "%{$s}%")
                       ->orWhere('item_name', 'like', "%{$s}%")
                       ->orWhere('detected_car_name', 'like', "%{$s}%");
+
+                    if ($cleanNoDash !== '') {
+                        $q->orWhere(DB::raw("UPPER(REPLACE(REPLACE(item_number, '-', ''), ' ', ''))"), 'like', "%{$cleanNoDash}%");
+                    }
                 });
             }
 
-            $items = $query->latest()->paginate(15);
+            $items = $query->latest()->paginate(15)->withQueryString();
 
             if ($request->ajax() || $request->wantsJson()) {
-                $html = view('inventory.partials.table_rows', compact('items'))->render();
-                return response()->json(['html' => $html]);
+                if (view()->exists('inventory.partials.table_rows')) {
+                    $html = view('inventory.partials.table_rows', compact('items'))->render();
+                    return response()->json(['html' => $html]);
+                }
             }
 
             $viewingClient = ($user->role === 'admin' && $request->filled('client_id')) ? User::find($targetUserId) : null;
 
-            return view('inventory.index', compact('items', 'viewingClient'));
+            $renderedPage = view('inventory.index', compact('items', 'viewingClient'))->render();
+            return response(injectInventoryLiveSearchAndFiltersScript($renderedPage));
         })->name('index');
 
         Route::post('/', function (Request $request) {
@@ -1608,7 +2469,6 @@ Route::middleware('auth')->group(function () {
             return back()->with('success', 'تمت إضافة الصنف بنجاح.');
         })->name('store');
 
-        // استيراد الإكسل فائق السرعة في الخلفية مع الربط الذكي للأعمدة ونقطة الاسترجاع الفورية
         Route::post('/import', function (Request $request) {
             @ignore_user_abort(true);
             @set_time_limit(0);
@@ -1828,7 +2688,8 @@ Route::middleware('auth')->group(function () {
                 return $client;
             });
 
-        return view('pages.clients', compact('clients'));
+        $rendered = view('pages.clients', compact('clients'))->render();
+        return response(injectSidebarNavigationLinks($rendered));
     })->name('clients.index');
 
     Route::post('/clients', function (Request $request) {
@@ -1909,11 +2770,16 @@ Route::middleware('auth')->group(function () {
             );
 
         if ($search !== '') {
-            $query->where(function ($q) use ($search) {
+            $cleanNoDash = normalizePartNumberClean($search);
+            $query->where(function ($q) use ($search, $cleanNoDash) {
                 $q->where('master_items.item_number', 'like', "%{$search}%")
                   ->orWhere('master_items.first_item_name', 'like', "%{$search}%")
                   ->orWhere('master_items.compatible_cars', 'like', "%{$search}%")
                   ->orWhere('items.item_name', 'like', "%{$search}%");
+
+                if ($cleanNoDash !== '') {
+                    $q->orWhere(DB::raw("UPPER(REPLACE(REPLACE(master_items.item_number, '-', ''), ' ', ''))"), 'like', "%{$cleanNoDash}%");
+                }
             });
         }
 
@@ -1927,7 +2793,8 @@ Route::middleware('auth')->group(function () {
             ->paginate(50)
             ->withQueryString();
 
-        return view('pages.master_catalog', compact('masterItems'));
+        $rendered = view('pages.master_catalog', compact('masterItems'))->render();
+        return response(injectSidebarNavigationLinks($rendered));
     })->name('master.catalog');
 
     // 4. صفحة تفاصيل الرقم الموحد
@@ -1949,94 +2816,11 @@ Route::middleware('auth')->group(function () {
 
         $keywords = collect();
 
-        return view('pages.master_details', compact('itemNumber', 'master', 'clientHoldings', 'keywords'));
+        $rendered = view('pages.master_details', compact('itemNumber', 'master', 'clientHoldings', 'keywords'))->render();
+        return response(injectSidebarNavigationLinks($rendered));
     })->name('master.item.details');
 
-    // 5. إعدادات السيارات
-    Route::get('/cars-dictionary', function () {
-        if (auth()->user()->role !== 'admin') {
-            abort(403, 'هذه الصفحة مخصصة لمدير النظام فقط.');
-        }
-
-        $cars         = DB::table('cars')->latest()->get();
-        $yearPatterns = DB::table('year_patterns')->latest()->get();
-
-        return view('pages.cars_dictionary', compact('cars', 'yearPatterns'));
-    })->name('cars.dictionary');
-
-    Route::post('/cars-dictionary/car', function (Request $request) {
-        if (auth()->user()->role !== 'admin') abort(403);
-
-        $request->validate([
-            'car_name' => 'required|string|max:255',
-            'category' => 'required|string|max:255',
-        ]);
-
-        DB::table('cars')->insert([
-            'car_name'   => trim($request->car_name),
-            'category'   => trim($request->category),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
-
-        return back()->with('success', 'تمت إضافة السيارة وفئتها بنجاح.');
-    })->name('cars.store');
-
-    Route::delete('/cars-dictionary/car/{id}', function ($id) {
-        if (auth()->user()->role !== 'admin') abort(403);
-        DB::table('cars')->where('id', $id)->delete();
-        return back()->with('success', 'تم حذف السيارة ومرادفاتها بنجاح.');
-    })->name('cars.destroy');
-
-    Route::get('/cars-dictionary/car/{id}/aliases', function ($id) {
-        if (auth()->user()->role !== 'admin') abort(403);
-
-        $car = DB::table('cars')->where('id', $id)->first();
-        if (!$car) abort(404);
-
-        $aliases = DB::table('car_aliases')->where('car_id', $id)->get();
-
-        return view('pages.car_aliases', compact('car', 'aliases'));
-    })->name('cars.aliases');
-
-    Route::post('/cars-dictionary/car/{id}/aliases', function (Request $request, $id) {
-        if (auth()->user()->role !== 'admin') abort(403);
-
-        DB::table('car_aliases')->insert([
-            'car_id'     => $id,
-            'alias'      => trim((string) $request->alias),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
-
-        return back()->with('success', 'تمت إضافة المرادف بنجاح.');
-    })->name('cars.aliases.store');
-
-    Route::delete('/cars-dictionary/alias/{id}', function ($id) {
-        if (auth()->user()->role !== 'admin') abort(403);
-        DB::table('car_aliases')->where('id', $id)->delete();
-        return back()->with('success', 'تم حذف المرادف.');
-    })->name('cars.aliases.delete');
-
-    Route::post('/cars-dictionary/year-pattern', function (Request $request) {
-        if (auth()->user()->role !== 'admin') abort(403);
-
-        DB::table('year_patterns')->insert([
-            'pattern_example' => trim((string) $request->pattern_example),
-            'created_at'      => now(),
-            'updated_at'      => now(),
-        ]);
-
-        return back()->with('success', 'تمت إضافة نمط سنة الصنع بنجاح.');
-    })->name('year.pattern.store');
-
-    Route::delete('/cars-dictionary/year-pattern/{id}', function ($id) {
-        if (auth()->user()->role !== 'admin') abort(403);
-        DB::table('year_patterns')->where('id', $id)->delete();
-        return back()->with('success', 'تم الحذف.');
-    })->name('year.pattern.destroy');
-
-    // 6. مسارات الرد الآلي عبر الواتساب (الاستعلام برقم الصنف فقط) والحدود والاستثناءات
+    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) - نظيفة تماماً وبدون أي تداخل
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId          = auth()->id();
         $customerMessage = (string) $request->query('message', '');
@@ -2044,20 +2828,32 @@ Route::middleware('auth')->group(function () {
         $botSettings     = getUserBotSettings($userId);
 
         if (trim($customerMessage) !== '') {
-            $partNumbers = extractPartNumbersFromWhatsappText($customerMessage, $userId);
+            $extractedWithQty = extractPartNumbersWithQuantitiesFromText($customerMessage, $userId);
+            $partNumbers      = array_map(fn($x) => $x['part_number'], $extractedWithQty);
 
             if (!empty($partNumbers)) {
                 $matchedItems = Item::where('user_id', $userId)
                     ->where('quantity', '>', 0)
                     ->where(function ($q) use ($partNumbers) {
                         foreach ($partNumbers as $pNum) {
-                            $cleanNoDash = str_replace('-', '', $pNum);
+                            $cleanNoDash = normalizePartNumberClean($pNum);
                             $q->orWhere('item_number', $pNum)
-                              ->orWhere(DB::raw("REPLACE(item_number, '-', '')"), $cleanNoDash)
-                              ->orWhere('item_number', 'like', "%{$pNum}%");
+                              ->orWhere(DB::raw("UPPER(REPLACE(REPLACE(item_number, '-', ''), ' ', ''))"), $cleanNoDash);
                         }
                     })
                     ->get();
+
+                // تسجيل تجربة التسعير في الرادار أيضاً ليظهر للأدمن فوراً
+                foreach ($extractedWithQty as $reqItem) {
+                    $pNum = $reqItem['part_number'];
+                    $rQty = max(1, (int) ($reqItem['requested_qty'] ?? 1));
+                    $found = findExactItemIgnoringDashes($userId, $pNum, true);
+                    if ($found) {
+                        recordRadarInquiryLog($userId, 'محاكي الصفحة', $found->item_number, $found->item_name, 'available', $rQty, (int) $found->quantity, (float) $found->price, 'text');
+                    } else {
+                        recordRadarInquiryLog($userId, 'محاكي الصفحة', $pNum, null, 'unavailable', $rQty, 0, null, 'text');
+                    }
+                }
             }
         }
 
@@ -2072,15 +2868,618 @@ Route::middleware('auth')->group(function () {
             ->take(20)
             ->get();
 
-        return view('pages.second', [
+        $rendered = view('pages.second', [
             'customerMessage' => $customerMessage,
             'matchedItems'    => $matchedItems,
             'botSettings'     => $botSettings,
             'whitelistPhones' => $whitelistPhones,
             'customerQuotas'  => $customerQuotas,
-        ]);
+        ])->render();
+
+        return response(injectSidebarNavigationLinks($rendered));
     })->name('pages.second');
 
+    // 6. صفحة مستقلة تماماً: إدارة الاستثناءات المتقدمة والتصفير التلقائي والقائمة السوداء (/whatsapp-quotas)
+    Route::get('/whatsapp-quotas', function () {
+        $userId      = auth()->id();
+        $botSettings = getUserBotSettings($userId);
+        $csrfToken   = csrf_token();
+
+        $whitelistPhones = DB::table('whatsapp_whitelist_phones')
+            ->where('user_id', $userId)
+            ->latest()
+            ->get();
+
+        $blacklistPhones = DB::table('whatsapp_blacklist_phones')
+            ->where('user_id', $userId)
+            ->latest()
+            ->get();
+
+        $customerQuotas = DB::table('whatsapp_customer_quotas')
+            ->where('user_id', $userId)
+            ->orderByDesc('updated_at')
+            ->take(50)
+            ->get();
+
+        $resetPeriod = $botSettings['quota_reset_period'] ?? 'manual';
+        $maxLimit    = htmlspecialchars((string) ($botSettings['max_queries_per_phone'] ?? '0'), ENT_QUOTES, 'UTF-8');
+
+        $selManual  = $resetPeriod === 'manual' ? 'selected' : '';
+        $selDaily   = $resetPeriod === 'daily' ? 'selected' : '';
+        $selMonthly = $resetPeriod === 'monthly' ? 'selected' : '';
+
+        $whitelistRowsHtml = '';
+        foreach ($whitelistPhones as $w) {
+            $quotaBadge = (!empty($w->custom_quota) && (int) $w->custom_quota > 0)
+                ? "<span style='background:#dbeafe;color:#1e40af;padding:3px 10px;border-radius:6px;font-size:12px;font-weight:700;'>محدد ({$w->custom_quota} رقم)</span>"
+                : "<span style='background:#dcfce7;color:#166534;padding:3px 10px;border-radius:6px;font-size:12px;font-weight:700;'>مفتوح بلا حد</span>";
+
+            $timeWindow = (!empty($w->allowed_start_time) && !empty($w->allowed_end_time))
+                ? "⏰ {$w->allowed_start_time} إلى {$w->allowed_end_time}"
+                : "🕒 طوال اليوم (24 ساعة)";
+
+            $perms = [];
+            if ($w->allow_available ?? true)   $perms[] = "✅ المتوفر";
+            if ($w->allow_unavailable ?? true) $perms[] = "❌ غير المتوفر";
+            if ($w->allow_prices ?? true)      $perms[] = "💰 الأسعار";
+            if ($w->allow_quantities ?? true)  $perms[] = "📦 الكميات";
+            if ($w->allow_excel ?? true)       $perms[] = "📊 ملفات إكسل";
+            $permsStr = implode(' | ', $perms);
+
+            $delUrl    = route('pages.second.whitelist.delete', $w->id);
+            $labelSafe = htmlspecialchars((string) ($w->label ?? 'بدون اسم'), ENT_QUOTES, 'UTF-8');
+
+            $whitelistRowsHtml .= "
+            <tr style='border-bottom:1px solid #e2e8f0;'>
+                <td style='padding:12px;font-weight:700;font-family:monospace;font-size:14px;'>{$w->phone}</td>
+                <td style='padding:12px;font-weight:600;'>{$labelSafe}</td>
+                <td style='padding:12px;'>{$quotaBadge}</td>
+                <td style='padding:12px;font-size:13px;'>{$timeWindow}</td>
+                <td style='padding:12px;font-size:12px;color:#334155;'>{$permsStr}</td>
+                <td style='padding:12px;'>
+                    <form method='POST' action='{$delUrl}' style='display:inline;'>
+                        <input type='hidden' name='_token' value='{$csrfToken}'>
+                        <input type='hidden' name='_method' value='DELETE'>
+                        <button type='submit' style='background:#ef4444;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>حذف</button>
+                    </form>
+                </td>
+            </tr>";
+        }
+        if ($whitelistRowsHtml === '') {
+            $whitelistRowsHtml = "<tr><td colspan='6' style='padding:18px;text-align:center;color:#64748b;'>لا توجد أرقام مضافة في قائمة الاستثناء حالياً.</td></tr>";
+        }
+
+        $blacklistRowsHtml = '';
+        foreach ($blacklistPhones as $b) {
+            $delBUrl    = route('pages.second.blacklist.delete', $b->id);
+            $reasonSafe = htmlspecialchars((string) ($b->reason ?? 'بدون سبب'), ENT_QUOTES, 'UTF-8');
+            $blacklistRowsHtml .= "
+            <tr style='border-bottom:1px solid #e2e8f0;'>
+                <td style='padding:10px;font-weight:700;color:#b91c1c;font-family:monospace;'>{$b->phone}</td>
+                <td style='padding:10px;'>{$reasonSafe}</td>
+                <td style='padding:10px;font-size:12px;color:#64748b;direction:ltr;'>{$b->created_at}</td>
+                <td style='padding:10px;'>
+                    <form method='POST' action='{$delBUrl}' style='display:inline;'>
+                        <input type='hidden' name='_token' value='{$csrfToken}'>
+                        <input type='hidden' name='_method' value='DELETE'>
+                        <button type='submit' style='background:#475569;color:#fff;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;'>إلغاء الحظر</button>
+                    </form>
+                </td>
+            </tr>";
+        }
+        if ($blacklistRowsHtml === '') {
+            $blacklistRowsHtml = "<tr><td colspan='4' style='padding:16px;text-align:center;color:#64748b;'>لا توجد أرقام محظورة في القائمة السوداء.</td></tr>";
+        }
+
+        $quotaRowsHtml = '';
+        $resetUrl = route('pages.second.quotas.reset');
+        foreach ($customerQuotas as $q) {
+            $quotaRowsHtml .= "
+            <tr style='border-bottom:1px solid #e2e8f0;'>
+                <td style='padding:10px;font-weight:700;font-family:monospace;'>{$q->phone}</td>
+                <td style='padding:10px;font-weight:700;color:#1d4ed8;'>{$q->queries_count} رقم صنف</td>
+                <td style='padding:10px;font-size:12px;color:#64748b;direction:ltr;'>{$q->updated_at}</td>
+                <td style='padding:10px;'>
+                    <form method='POST' action='{$resetUrl}' style='display:inline;'>
+                        <input type='hidden' name='_token' value='{$csrfToken}'>
+                        <input type='hidden' name='quota_id' value='{$q->id}'>
+                        <button type='submit' style='background:#0284c7;color:#fff;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;'>تصفير هذا الرقم</button>
+                    </form>
+                </td>
+            </tr>";
+        }
+        if ($quotaRowsHtml === '') {
+            $quotaRowsHtml = "<tr><td colspan='4' style='padding:16px;text-align:center;color:#64748b;'>لا توجد استعلامات مسجلة في العداد حالياً.</td></tr>";
+        }
+
+        $settingsActionUrl  = route('pages.second.settings');
+        $whitelistActionUrl = route('pages.second.whitelist.add');
+        $blacklistActionUrl = route('pages.second.blacklist.add');
+
+        $contentHtml = <<<HTML
+        <div style="padding:24px;max-width:1300px;margin:0 auto;direction:rtl;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                <div>
+                    <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;">🛡️ إدارة الاستثناءات والحصص والتصفير التلقائي</h1>
+                    <p style="margin:6px 0 0 0;font-size:14px;color:#64748b;">تحكم كامل في الحد العام، التصفير اليومي/الشهري، صلاحيات المستثنين الدقيقة، والقائمة السوداء.</p>
+                </div>
+            </div>
+
+            <!-- 1. التصفير التلقائي والحد العام -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:22px;margin-bottom:24px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+                <h3 style="margin:0 0 10px 0;font-size:18px;color:#0f172a;">🔄 نظام الحصة العام والتصفير التلقائي (كل رقم صنف = 1 استعلام)</h3>
+                <p style="margin:0 0 16px 0;font-size:13px;color:#475569;">
+                    💡 إذا كان الحد العام مثلاً <b>5</b> وأرسل العميل <b>5 أرقام أصناف</b> في رسالة واحدة، تُحتسب <b>5 استعلامات</b> (لأن كل رقم صنف يُحتسب بـ 1).
+                </p>
+                <form method="POST" action="{$settingsActionUrl}" style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;">
+                    <input type="hidden" name="_token" value="{$csrfToken}">
+                    <div>
+                        <label style="display:block;font-size:13px;font-weight:700;color:#1e293b;margin-bottom:6px;">الحد العام للاستعلام لكل رقم (0 = مفتوح):</label>
+                        <input type="number" name="max_queries_per_phone" min="0" value="{$maxLimit}" style="padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;width:220px;">
+                    </div>
+                    <div>
+                        <label style="display:block;font-size:13px;font-weight:700;color:#1e293b;margin-bottom:6px;">دورة التصفير التلقائي لعداد الاستعلامات:</label>
+                        <select name="quota_reset_period" style="padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;background:#f8fafc;min-width:260px;">
+                            <option value="manual" {$selManual}>يدوي فقط (من زر تصفير العداد)</option>
+                            <option value="daily" {$selDaily}>تلقائي يومياً (كل 24 ساعة)</option>
+                            <option value="monthly" {$selMonthly}>تلقائي بداية كل شهر</option>
+                        </select>
+                    </div>
+                    <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:10px 22px;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px;">
+                        💾 حفظ إعدادات الحد والتصفير
+                    </button>
+                </form>
+            </div>
+
+            <!-- 2. نظام الاستثناءات المتقدم -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:22px;margin-bottom:24px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+                <h3 style="margin:0 0 14px 0;font-size:18px;color:#0f172a;">🌟 قائمة الاستثناء المتقدمة (صلاحيات مخصصة + أوقات معينة + دعم الإكسل)</h3>
+                <form method="POST" action="{$whitelistActionUrl}" style="background:#f8fafc;padding:18px;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:20px;">
+                    <input type="hidden" name="_token" value="{$csrfToken}">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:14px;">
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">رقم الجوال *</label>
+                            <input type="text" name="phone" required placeholder="05XXXXXXXX" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">اسم العميل / الوصف</label>
+                            <input type="text" name="label" placeholder="مثال: ورشة النخبة" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">عدد مرات الاستعلام (0 = مفتوح)</label>
+                            <input type="number" name="custom_quota" min="0" value="0" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">من الساعة (اختياري)</label>
+                            <input type="time" name="allowed_start_time" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:700;margin-bottom:5px;">إلى الساعة (اختياري)</label>
+                            <input type="time" name="allowed_end_time" style="width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;">
+                        </div>
+                    </div>
+
+                    <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding-top:12px;border-top:1px dashed #cbd5e1;">
+                        <span style="font-size:13px;font-weight:700;color:#1e293b;">صلاحيات الرد المسموحة لهذا العميل:</span>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                            <input type="checkbox" name="allow_available" value="1" checked> ✅ إظهار المتوفر
+                        </label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                            <input type="checkbox" name="allow_unavailable" value="1" checked> ❌ إظهار غير المتوفر
+                        </label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                            <input type="checkbox" name="allow_prices" value="1" checked> 💰 إظهار الأسعار
+                        </label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                            <input type="checkbox" name="allow_quantities" value="1" checked> 📦 إظهار الكميات المتوفرة
+                        </label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                            <input type="checkbox" name="allow_excel" value="1" checked> 📊 السماح بالاستعلام عبر ملف Excel
+                        </label>
+                        <button type="submit" style="margin-right:auto;background:#16a34a;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-weight:700;cursor:pointer;">
+                            + حفظ / تحديث الرقم المستثنى
+                        </button>
+                    </div>
+                </form>
+
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
+                        <thead>
+                            <tr style="background:#f1f5f9;color:#334155;">
+                                <th style="padding:12px;">رقم الجوال</th>
+                                <th style="padding:12px;">الاسم / الوصف</th>
+                                <th style="padding:12px;">حد الاستعلام</th>
+                                <th style="padding:12px;">الأوقات المسموحة</th>
+                                <th style="padding:12px;">الصلاحيات المفعلة</th>
+                                <th style="padding:12px;">إجراء</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {$whitelistRowsHtml}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 3. القائمة السوداء (Blacklist) -->
+            <div style="background:#ffffff;border:1px solid #fee2e2;border-radius:14px;padding:22px;margin-bottom:24px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+                <h3 style="margin:0 0 12px 0;font-size:18px;color:#991b1b;">🚫 القائمة السوداء (Blacklist) - حظر الأرقام من الاستعلام نهائياً</h3>
+                <form method="POST" action="{$blacklistActionUrl}" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
+                    <input type="hidden" name="_token" value="{$csrfToken}">
+                    <input type="text" name="phone" required placeholder="رقم الجوال المراد حظره (05XXXXXXXX)" style="flex:1;min-width:220px;padding:9px 14px;border:1px solid #fca5a5;border-radius:8px;">
+                    <input type="text" name="reason" placeholder="سبب الحظر (اختياري)" style="flex:1;min-width:220px;padding:9px 14px;border:1px solid #cbd5e1;border-radius:8px;">
+                    <button type="submit" style="background:#dc2626;color:#fff;border:none;padding:9px 20px;border-radius:8px;font-weight:700;cursor:pointer;">
+                        حظر الرقم فوراً
+                    </button>
+                </form>
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
+                        <thead>
+                            <tr style="background:#fef2f2;color:#991b1b;">
+                                <th style="padding:10px;">الرقم المحظور</th>
+                                <th style="padding:10px;">السبب</th>
+                                <th style="padding:10px;">تاريخ الحظر</th>
+                                <th style="padding:10px;">إجراء</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {$blacklistRowsHtml}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 4. سجل عداد الاستعلامات الحالي للعملاء -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:22px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+                    <h3 style="margin:0;font-size:18px;color:#0f172a;">📊 عداد استهلاك الأرقام وحصص العملاء</h3>
+                    <form method="POST" action="{$resetUrl}" onsubmit="return confirm('هل تريد تصفير العداد لجميع الأرقام؟');">
+                        <input type="hidden" name="_token" value="{$csrfToken}">
+                        <button type="submit" style="background:#dc2626;color:#fff;border:none;padding:8px 16px;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;">
+                            🔄 تصفير جميع العدادات
+                        </button>
+                    </form>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
+                        <thead>
+                            <tr style="background:#f1f5f9;color:#334155;">
+                                <th style="padding:10px;">رقم الجوال</th>
+                                <th style="padding:10px;">الأرقام المستهلكة</th>
+                                <th style="padding:10px;">آخر استعلام</th>
+                                <th style="padding:10px;">إجراء</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {$quotaRowsHtml}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+HTML;
+
+        return response(renderStandalonePageInsideMainLayout('إدارة الاستثناءات والحصص', $contentHtml));
+    })->name('whatsapp.quotas.page');
+
+    // 7. صفحة مستقلة تماماً خاصة بالأدمن فقط: رادار الطلبات العام الموحد (/admin-radar)
+    Route::get('/admin-radar', function (Request $request) {
+        if (auth()->user()->role !== 'admin') {
+            abort(403);
+        }
+
+        $csrfToken    = csrf_token();
+        $search       = trim((string) $request->query('search', ''));
+        $statusFilter = trim((string) $request->query('status', 'all'));
+
+        // جلب جميع سجلات الاستعلام من جميع العملاء والمتاجر في النظام وتجميعها برقم الصنف الموحد بدون تكرار
+        $allLogs = DB::table('whatsapp_inquiry_logs')
+            ->leftJoin('users', 'whatsapp_inquiry_logs.user_id', '=', 'users.id')
+            ->select(
+                'whatsapp_inquiry_logs.*',
+                DB::raw("COALESCE(users.name, 'المدير العام') as merchant_name")
+            )
+            ->orderByDesc('whatsapp_inquiry_logs.id')
+            ->get();
+
+        $groupedRadar = [];
+
+        foreach ($allLogs as $log) {
+            $normKey = $log->normalized_part ?: normalizePartNumberClean((string) $log->part_number);
+            if ($normKey === '') continue;
+
+            $dayStr = !empty($log->inquiry_date)
+                ? $log->inquiry_date
+                : substr((string) $log->created_at, 0, 10);
+
+            if (!isset($groupedRadar[$normKey])) {
+                $groupedRadar[$normKey] = [
+                    'normalized_part' => $normKey,
+                    'part_number'     => $log->part_number,
+                    'item_name'       => $log->item_name ?: null,
+                    'unique_days_map' => [], // لحساب عدد الأيام الفريدة (بحد أقصى 1 لكل يوم)
+                    'detailed_count'  => 0,  // لحساب العدد التفصيلي الشامل حتى لو تكرر في نفس اليوم
+                    'avail_count'     => 0,
+                    'unavail_count'   => 0,
+                    'total_req_qty'   => 0,
+                    'last_status'     => $log->status,
+                    'last_date'       => $log->created_at,
+                    'details_list'    => [],
+                ];
+            }
+
+            if (empty($groupedRadar[$normKey]['item_name']) && !empty($log->item_name)) {
+                $groupedRadar[$normKey]['item_name'] = $log->item_name;
+            }
+
+            // 1. العمود الأول: يحتسب 1 فقط لكل يوم (لا يزيد عن 1 إذا تكرر الطلب في نفس اليوم)
+            $groupedRadar[$normKey]['unique_days_map'][$dayStr] = true;
+
+            // 2. العمود الثاني (التفصيلي): يحتسب +1 في كل مرة يتم تسعيرها أو طلبها حتى لو مكررة بنفس اليوم
+            $groupedRadar[$normKey]['detailed_count']++;
+
+            if ($log->status === 'available') {
+                $groupedRadar[$normKey]['avail_count']++;
+            } else {
+                $groupedRadar[$normKey]['unavail_count']++;
+            }
+
+            $groupedRadar[$normKey]['total_req_qty'] += (int) $log->requested_qty;
+
+            if (count($groupedRadar[$normKey]['details_list']) < 50) {
+                $groupedRadar[$normKey]['details_list'][] = [
+                    'date'          => (string) $log->created_at,
+                    'day'           => $dayStr,
+                    'customer'      => (string) $log->phone,
+                    'merchant'      => (string) $log->merchant_name,
+                    'status'        => (string) $log->status,
+                    'req_qty'       => (int) $log->requested_qty,
+                    'avail_qty'     => (int) $log->available_qty,
+                    'price'         => $log->price !== null ? number_format((float) $log->price, 2) : '—',
+                    'source'        => $log->source === 'excel' ? 'ملف إكسل' : 'رسالة واتساب',
+                ];
+            }
+        }
+
+        // فلترة البحث والحالة
+        $cleanSearchNoDash = normalizePartNumberClean($search);
+        $filteredItems = array_filter($groupedRadar, function ($row) use ($search, $cleanSearchNoDash, $statusFilter) {
+            if ($statusFilter === 'available' && $row['avail_count'] === 0) {
+                return false;
+            }
+            if ($statusFilter === 'unavailable' && $row['unavail_count'] === 0) {
+                return false;
+            }
+            if ($search !== '') {
+                $matchPart = str_contains(strtoupper($row['part_number']), strtoupper($search))
+                          || ($cleanSearchNoDash !== '' && str_contains($row['normalized_part'], $cleanSearchNoDash));
+                $matchName = !empty($row['item_name']) && str_contains($row['item_name'], $search);
+                if (!$matchPart && !$matchName) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        // ترتيب حسب الأكثر طلباً
+        usort($filteredItems, function ($a, $b) {
+            $daysA = count($a['unique_days_map']);
+            $daysB = count($b['unique_days_map']);
+            if ($daysA !== $daysB) {
+                return $daysB <=> $daysA;
+            }
+            return $b['detailed_count'] <=> $a['detailed_count'];
+        });
+
+        $totalUniqueParts   = count($groupedRadar);
+        $totalDetailedCalls = count($allLogs);
+
+        $radarRowsHtml = '';
+        $detailsMapForJs = [];
+
+        foreach ($filteredItems as $idx => $item) {
+            $uniqueDaysCount = count($item['unique_days_map']);
+            $detailedCount   = $item['detailed_count'];
+            $partKey         = $item['normalized_part'];
+            $detailsMapForJs[$partKey] = [
+                'part_number'    => $item['part_number'],
+                'item_name'      => $item['item_name'] ?: 'غير مسجل في المخزون',
+                'unique_days'    => $uniqueDaysCount,
+                'detailed_count' => $detailedCount,
+                'records'        => $item['details_list'],
+            ];
+
+            $nameDisplay = htmlspecialchars((string) ($item['item_name'] ?: '— غير مسجل في المخزون —'), ENT_QUOTES, 'UTF-8');
+            $partDisplay = htmlspecialchars((string) $item['part_number'], ENT_QUOTES, 'UTF-8');
+
+            if ($item['avail_count'] > 0 && $item['unavail_count'] > 0) {
+                $statusHtml = "<span style='background:#dcfce7;color:#166534;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700;'>متوفر ({$item['avail_count']})</span>
+                               <span style='background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700;margin-right:4px;'>غير متوفر ({$item['unavail_count']})</span>";
+            } elseif ($item['avail_count'] > 0) {
+                $statusHtml = "<span style='background:#dcfce7;color:#166534;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>✅ متوفر ({$item['avail_count']})</span>";
+            } else {
+                $statusHtml = "<span style='background:#fee2e2;color:#991b1b;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>❌ غير متوفر ({$item['unavail_count']})</span>";
+            }
+
+            $radarRowsHtml .= "
+            <tr style='border-bottom:1px solid #e2e8f0;transition:background 0.15s;' onmouseover=\"this.style.background='#f8fafc'\" onmouseout=\"this.style.background='transparent'\">
+                <td style='padding:12px;font-weight:800;font-family:monospace;font-size:15px;color:#0f172a;'>{$partDisplay}</td>
+                <td style='padding:12px;font-weight:600;color:#334155;'>{$nameDisplay}</td>
+                <td style='padding:12px;'>{$statusHtml}</td>
+                <td style='padding:12px;text-align:center;'>
+                    <span style='background:#dbeafe;color:#1e40af;padding:5px 14px;border-radius:999px;font-size:14px;font-weight:800;display:inline-block;'>
+                        {$uniqueDaysCount}
+                    </span>
+                    <div style='font-size:11px;color:#64748b;margin-top:3px;'>بحد أقصى 1 باليوم</div>
+                </td>
+                <td style='padding:12px;text-align:center;'>
+                    <div style='display:flex;align-items:center;justify-content:center;gap:8px;'>
+                        <span style='background:#f3e8ff;color:#6b21a8;padding:5px 14px;border-radius:999px;font-size:14px;font-weight:800;'>
+                            {$detailedCount}
+                        </span>
+                        <button type='button' onclick=\"openRadarDetailsModal('{$partKey}')\" style='background:#0f172a;color:#ffffff;border:none;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;'>
+                            🔍 السجل التفصيلي بالتواريخ
+                        </button>
+                    </div>
+                    <div style='font-size:11px;color:#64748b;margin-top:3px;'>شامل التكرار بنفس اليوم</div>
+                </td>
+                <td style='padding:12px;font-size:12px;color:#475569;direction:ltr;text-align:right;'>{$item['last_date']}</td>
+            </tr>";
+        }
+
+        if ($radarRowsHtml === '') {
+            $radarRowsHtml = "<tr><td colspan='6' style='padding:24px;text-align:center;color:#64748b;font-size:14px;'>لا توجد أرقام مسجلة في الرادار مطابقة للبحث الحالي.</td></tr>";
+        }
+
+        $detailsJson = json_encode($detailsMapForJs, JSON_UNESCAPED_UNICODE);
+        $clearLogsUrl = route('pages.second.logs.clear');
+        $radarUrl     = route('admin.radar.page');
+        $searchSafe   = htmlspecialchars($search, ENT_QUOTES, 'UTF-8');
+
+        $selAll     = $statusFilter === 'all' ? 'selected' : '';
+        $selAvail   = $statusFilter === 'available' ? 'selected' : '';
+        $selUnavail = $statusFilter === 'unavailable' ? 'selected' : '';
+
+        $contentHtml = <<<HTML
+        <div style="padding:24px;max-width:1350px;margin:0 auto;direction:rtl;">
+            <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px;margin-bottom:22px;">
+                <div>
+                    <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;">📡 رادار الطلبات العام الموحد (خاص بالأدمن)</h1>
+                    <p style="margin:6px 0 0 0;font-size:14px;color:#64748b;">
+                        يجمع كافة الأرقام التي تم تسعيرها أو طلبها من جميع العملاء والمتاجر بدون تكرار رقم الصنف، مع فصل العد اليومي عن العد التفصيلي الشامل.
+                    </p>
+                </div>
+                <div style="display:flex;gap:12px;align-items:center;">
+                    <div style="background:#eff6ff;border:1px solid #bfdbfe;padding:10px 16px;border-radius:10px;text-align:center;">
+                        <div style="font-size:11px;color:#1e40af;font-weight:700;">إجمالي الأصناف الفريدة</div>
+                        <div style="font-size:20px;font-weight:800;color:#1d4ed8;">{$totalUniqueParts}</div>
+                    </div>
+                    <div style="background:#faf5ff;border:1px solid #e9d5ff;padding:10px 16px;border-radius:10px;text-align:center;">
+                        <div style="font-size:11px;color:#6b21a8;font-weight:700;">إجمالي عمليات التسعير التفصيلية</div>
+                        <div style="font-size:20px;font-weight:800;color:#7e22ce;">{$totalDetailedCalls}</div>
+                    </div>
+                    <form method="POST" action="{$clearLogsUrl}" onsubmit="return confirm('هل أنت متأكد من تصفير ومسح سجل الرادار بالكامل؟');">
+                        <input type="hidden" name="_token" value="{$csrfToken}">
+                        <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:10px 16px;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px;">
+                            🗑️ تصفير الرادار
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- شريط البحث والفلترة -->
+            <form method="GET" action="{$radarUrl}" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;">
+                <input type="text" name="search" value="{$searchSafe}" placeholder="ابحث برقم الصنف (مع شرطة أو بدون) أو اسم القطعة..." style="flex:1;min-width:260px;padding:10px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;">
+                <select name="status" style="padding:10px 14px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;background:#f8fafc;">
+                    <option value="all" {$selAll}>📦 جميع الحالات (المتوفر وغير المتوفر)</option>
+                    <option value="available" {$selAvail}>✅ الأصناف المتوفرة فقط</option>
+                    <option value="unavailable" {$selUnavail}>❌ الأصناف غير المتوفرة (النواقص)</option>
+                </select>
+                <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:10px 22px;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px;">
+                    🔍 بحث وفلترة
+                </button>
+                <a href="{$radarUrl}" style="padding:10px 16px;border-radius:8px;border:1px solid #cbd5e1;color:#475569;text-decoration:none;font-size:13px;font-weight:700;">إعادة ضبط</a>
+            </form>
+
+            <!-- جدول الرادار الموحد بدون تكرار رقم الصنف -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
+                        <thead>
+                            <tr style="background:#0f172a;color:#ffffff;">
+                                <th style="padding:14px 12px;">رقم الصنف (بدون تكرار)</th>
+                                <th style="padding:14px 12px;">اسم الصنف</th>
+                                <th style="padding:14px 12px;">حالة التوفر المسجلة</th>
+                                <th style="padding:14px 12px;text-align:center;">عدد مرات الطلب اليومي (أقصى 1 باليوم)</th>
+                                <th style="padding:14px 12px;text-align:center;">العداد التفصيلي الشامل (شامل تكرار اليوم)</th>
+                                <th style="padding:14px 12px;">تاريخ آخر تسعير</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {$radarRowsHtml}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- نافذة عرض السجل التفصيلي بالتواريخ لكل رقم صنف -->
+        <div id="epc-radar-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:9999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
+            <div style="background:#ffffff;width:100%;max-width:950px;border-radius:16px;overflow:hidden;box-shadow:0 20px 25px -5px rgba(0,0,0,0.2);">
+                <div style="background:#0f172a;color:#ffffff;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <h3 id="epc-modal-title" style="margin:0;font-size:18px;">السجل التفصيلي للصنف</h3>
+                        <p id="epc-modal-subtitle" style="margin:4px 0 0 0;font-size:12px;color:#cbd5e1;"></p>
+                    </div>
+                    <button type="button" onclick="closeRadarDetailsModal()" style="background:#ef4444;color:#fff;border:none;padding:6px 14px;border-radius:8px;cursor:pointer;font-weight:700;">✕ إغلاق</button>
+                </div>
+                <div style="padding:20px;max-height:480px;overflow-y:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
+                        <thead>
+                            <tr style="background:#f1f5f9;color:#334155;">
+                                <th style="padding:10px;">#</th>
+                                <th style="padding:10px;">التاريخ والوقت</th>
+                                <th style="padding:10px;">رقم جوال العميل</th>
+                                <th style="padding:10px;">المتجر / التاجر</th>
+                                <th style="padding:10px;">الحالة وقت الطلب</th>
+                                <th style="padding:10px;">الكمية (مطلوب / متوفر)</th>
+                                <th style="padding:10px;">السعر</th>
+                                <th style="padding:10px;">المصدر</th>
+                            </tr>
+                        </thead>
+                        <tbody id="epc-modal-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <script>
+        window.epcRadarDetailsData = {$detailsJson};
+
+        function openRadarDetailsModal(partKey) {
+            const data = window.epcRadarDetailsData[partKey];
+            if (!data) return;
+
+            document.getElementById('epc-modal-title').textContent = '🔍 السجل التفصيلي لرقم الصنف: ' + data.part_number + ' (' + data.item_name + ')';
+            document.getElementById('epc-modal-subtitle').textContent =
+                'عدد الأيام الفريدة (بدون تكرار باليوم): ' + data.unique_days + ' | إجمالي مرات التسعير التفصيلية (شامل التكرار بنفس اليوم): ' + data.detailed_count;
+
+            const tbody = document.getElementById('epc-modal-tbody');
+            tbody.innerHTML = '';
+
+            data.records.forEach(function(rec, idx) {
+                const stBadge = rec.status === 'available'
+                    ? "<span style='background:#dcfce7;color:#166534;padding:2px 8px;border-radius:6px;font-weight:700;font-size:12px;'>✅ متوفر</span>"
+                    : "<span style='background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:6px;font-weight:700;font-size:12px;'>❌ غير متوفر</span>";
+
+                const tr = document.createElement('tr');
+                tr.style.borderBottom = '1px solid #e2e8f0';
+                tr.innerHTML = `
+                    <td style="padding:10px;font-weight:700;">\${idx + 1}</td>
+                    <td style="padding:10px;direction:ltr;font-family:monospace;">\${rec.date}</td>
+                    <td style="padding:10px;font-weight:700;font-family:monospace;">\${rec.customer}</td>
+                    <td style="padding:10px;">\${rec.merchant}</td>
+                    <td style="padding:10px;">\${stBadge}</td>
+                    <td style="padding:10px;">مطلوب: <b>\${rec.req_qty}</b> | متوفر: <b>\${rec.avail_qty}</b></td>
+                    <td style="padding:10px;">\${rec.price}</td>
+                    <td style="padding:10px;">\${rec.source}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            document.getElementById('epc-radar-modal').style.display = 'flex';
+        }
+
+        function closeRadarDetailsModal() {
+            document.getElementById('epc-radar-modal').style.display = 'none';
+        }
+        </script>
+HTML;
+
+        return response(renderStandalonePageInsideMainLayout('رادار الطلبات العام الموحد', $contentHtml));
+    })->name('admin.radar.page');
+
+    // حفظ إعدادات البوت والتصفير التلقائي
     Route::post('/ai-whatsapp/settings', function (Request $request) {
         $userId = auth()->id();
         $fields = [
@@ -2088,6 +3487,7 @@ Route::middleware('auth')->group(function () {
             'reply_unavailable',
             'reply_quota_exceeded',
             'max_queries_per_phone',
+            'quota_reset_period',
             'allow_group_replies',
             'whatsapp_api_url',
             'whatsapp_api_token',
@@ -2096,11 +3496,13 @@ Route::middleware('auth')->group(function () {
 
         foreach ($fields as $field) {
             if ($field === 'allow_group_replies') {
-                $val = $request->boolean($field) || $request->input($field) === '1' ? '1' : '0';
-                DB::table('user_bot_settings')->updateOrInsert(
-                    ['user_id' => $userId, 'key' => $field],
-                    ['value' => $val]
-                );
+                if ($request->exists($field) || $request->has('reply_available')) {
+                    $val = $request->boolean($field) || $request->input($field) === '1' ? '1' : '0';
+                    DB::table('user_bot_settings')->updateOrInsert(
+                        ['user_id' => $userId, 'key' => $field],
+                        ['value' => $val]
+                    );
+                }
                 continue;
             }
 
@@ -2112,9 +3514,10 @@ Route::middleware('auth')->group(function () {
             }
         }
 
-        return back()->with('success', 'تم حفظ إعدادات الواتساب وقوالب الرد بنجاح.');
+        return back()->with('success', 'تم حفظ الإعدادات بنجاح.');
     })->name('pages.second.settings');
 
+    // إضافة أو تحديث رقم في قائمة الاستثناء المتقدمة
     Route::post('/ai-whatsapp/whitelist', function (Request $request) {
         $userId   = auth()->id();
         $rawPhone = trim((string) $request->input('phone', ''));
@@ -2125,12 +3528,36 @@ Route::middleware('auth')->group(function () {
             return back()->with('error', 'يرجى إدخال رقم جوال صحيح.');
         }
 
+        $customQuota = (int) $request->input('custom_quota', 0);
+        $startTime   = trim((string) $request->input('allowed_start_time', '')) ?: null;
+        $endTime     = trim((string) $request->input('allowed_end_time', '')) ?: null;
+
+        $hasAdvancedFlags = $request->hasAny(['allow_available', 'allow_unavailable', 'allow_prices', 'allow_quantities', 'allow_excel', 'custom_quota']);
+
+        $allowAvailable   = $hasAdvancedFlags ? $request->boolean('allow_available') : true;
+        $allowUnavailable = $hasAdvancedFlags ? $request->boolean('allow_unavailable') : true;
+        $allowPrices      = $hasAdvancedFlags ? $request->boolean('allow_prices') : true;
+        $allowQuantities  = $hasAdvancedFlags ? $request->boolean('allow_quantities') : true;
+        $allowExcel       = $hasAdvancedFlags ? $request->boolean('allow_excel') : true;
+
         DB::table('whatsapp_whitelist_phones')->updateOrInsert(
             ['user_id' => $userId, 'phone' => $normalized],
-            ['label' => $label, 'updated_at' => now(), 'created_at' => now()]
+            [
+                'label'              => $label,
+                'custom_quota'       => $customQuota > 0 ? $customQuota : null,
+                'allowed_start_time' => $startTime,
+                'allowed_end_time'   => $endTime,
+                'allow_available'    => $allowAvailable,
+                'allow_unavailable'  => $allowUnavailable,
+                'allow_prices'       => $allowPrices,
+                'allow_quantities'   => $allowQuantities,
+                'allow_excel'        => $allowExcel,
+                'updated_at'         => now(),
+                'created_at'         => now(),
+            ]
         );
 
-        return back()->with('success', "تمت إضافة الرقم ({$normalized}) إلى قائمة الاستثناء (استعلام مفتوح بدون حد).");
+        return back()->with('success', "تم حفظ الرقم ({$normalized}) في قائمة الاستثناء مع صلاحياته المخصصة بنجاح.");
     })->name('pages.second.whitelist.add');
 
     Route::delete('/ai-whatsapp/whitelist/{id}', function ($id) {
@@ -2141,27 +3568,65 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حذف الرقم من قائمة الاستثناء.');
     })->name('pages.second.whitelist.delete');
 
+    // مسارات القائمة السوداء
+    Route::post('/ai-whatsapp/blacklist', function (Request $request) {
+        $userId     = auth()->id();
+        $rawPhone   = trim((string) $request->input('phone', ''));
+        $reason     = trim((string) $request->input('reason', ''));
+        $normalized = normalizeWhatsappDigits($rawPhone);
+
+        if ($normalized === '') {
+            return back()->with('error', 'يرجى إدخال رقم جوال صحيح لحظره.');
+        }
+
+        DB::table('whatsapp_blacklist_phones')->updateOrInsert(
+            ['user_id' => $userId, 'phone' => $normalized],
+            ['reason' => $reason, 'updated_at' => now(), 'created_at' => now()]
+        );
+
+        return back()->with('success', "تم حظر الرقم ({$normalized}) وإضافته للقائمة السوداء.");
+    })->name('pages.second.blacklist.add');
+
+    Route::delete('/ai-whatsapp/blacklist/{id}', function ($id) {
+        DB::table('whatsapp_blacklist_phones')
+            ->where('id', $id)
+            ->where('user_id', auth()->id())
+            ->delete();
+        return back()->with('success', 'تم إلغاء حظر الرقم من القائمة السوداء.');
+    })->name('pages.second.blacklist.delete');
+
+    // مسح سجل الرادار (للأدمن يمسح الرادار العام، وللمستخدم يمسح سجله)
+    Route::post('/ai-whatsapp/logs/clear', function () {
+        if (auth()->user()->role === 'admin') {
+            DB::table('whatsapp_inquiry_logs')->delete();
+        } else {
+            DB::table('whatsapp_inquiry_logs')->where('user_id', auth()->id())->delete();
+        }
+        return back()->with('success', 'تم مسح سجل رادار الطلبات بنجاح.');
+    })->name('pages.second.logs.clear');
+
     Route::post('/ai-whatsapp/quotas/reset', function (Request $request) {
         $userId = auth()->id();
         if ($request->filled('quota_id')) {
             DB::table('whatsapp_customer_quotas')
                 ->where('id', $request->input('quota_id'))
                 ->where('user_id', $userId)
-                ->update(['queries_count' => 0, 'updated_at' => now()]);
+                ->update(['queries_count' => 0, 'last_reset_at' => now(), 'updated_at' => now()]);
             return back()->with('success', 'تم تصفير عداد الاستعلامات لهذا الرقم.');
         }
 
         DB::table('whatsapp_customer_quotas')
             ->where('user_id', $userId)
-            ->update(['queries_count' => 0, 'updated_at' => now()]);
+            ->update(['queries_count' => 0, 'last_reset_at' => now(), 'updated_at' => now()]);
         return back()->with('success', 'تم تصفير عداد الاستعلامات لجميع الأرقام بنجاح.');
     })->name('pages.second.quotas.reset');
 
-    // 7. إعدادات الربط API والنسخ الاحتياطي
+    // 8. إعدادات الربط API والنسخ الاحتياطي
     Route::get('/page-third', function () {
         if (auth()->user()->role !== 'admin') abort(403);
         $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
-        return view('pages.third', compact('webhookLogs'));
+        $rendered = view('pages.third', compact('webhookLogs'))->render();
+        return response(injectSidebarNavigationLinks($rendered));
     })->name('pages.third');
 
     Route::get('/download-backup', function () {
