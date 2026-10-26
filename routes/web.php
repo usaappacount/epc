@@ -962,7 +962,7 @@ function extractPartNumbersFromWhatsappText(string $text, ?int $ownerUserId = nu
 
         // يجب أن يكون الكود مكوناً من حروف إنجليزية وأرقام وشرطات فقط ويحتوي على رقم واحد على الأقل
         if (preg_match('/^[A-Z0-9\-]+$/', $cleanTk) && preg_match('/\d/', $cleanTk)) {
-            $ cleanNoDash = str_replace('-', '', $cleanTk);
+            $cleanNoDash = str_replace('-', '', $cleanTk);
 
             $existsInDb = DB::table('items')
                 ->when($ownerUserId, function ($q) use ($ownerUserId) {
