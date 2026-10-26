@@ -447,7 +447,7 @@ function purgeCarAndYearKeywords(): void {
     foreach ($carsList as $c) {
         $forbiddenWords[] = normalizeArabicSpelling($c->car_name);
         foreach (preg_split('/[\s,\-\+\/\(\)\*\.]+/u', $c->car_name, -1, PREG_SPLIT_NO_EMPTY) as $cw) {
-            $ forbiddenNorm = normalizeArabicSpelling($cw);
+            $forbiddenNorm = normalizeArabicSpelling($cw);
             if (!in_array($forbiddenNorm, $protectedWords, true)) {
                 $forbiddenWords[] = $forbiddenNorm;
             }
