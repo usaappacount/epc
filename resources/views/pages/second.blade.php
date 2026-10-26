@@ -17,17 +17,31 @@
                     يعتمد الرد على مطابقة الكلمات المفتاحية مع السيارة وسنة الصنع ومخزونك الخاص.
                 </p>
             </div>
-            @if(($botSettings['allow_group_replies'] ?? '0') === '1')
-                <span class="bg-blue-50 text-blue-800 border border-blue-200 text-xs font-semibold px-3 py-1.5 rounded-full inline-flex items-center gap-1.5 self-start md:self-auto">
-                    <span>👥</span>
-                    <span>رد القروبات: مفعل</span>
-                </span>
-            @else
-                <span class="bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-semibold px-3 py-1.5 rounded-full inline-flex items-center gap-1.5 self-start md:self-auto">
-                    <span>🛡️</span>
-                    <span>رد القروبات: معطل (تجاهل المجموعات)</span>
-                </span>
-            @endif
+            <div class="flex flex-wrap items-center gap-2">
+                @if(($botSettings['enable_confidence_system'] ?? '1') === '1')
+                    <span class="bg-indigo-50 text-indigo-800 border border-indigo-200 text-xs font-semibold px-3 py-1.5 rounded-full inline-flex items-center gap-1.5">
+                        <span>🎯</span>
+                        <span>حساسية التطابق: مفعلة</span>
+                    </span>
+                @else
+                    <span class="bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold px-3 py-1.5 rounded-full inline-flex items-center gap-1.5">
+                        <span>⚡</span>
+                        <span>حساسية التطابق: موقفة (رد مباشر)</span>
+                    </span>
+                @endif
+
+                @if(($botSettings['allow_group_replies'] ?? '0') === '1')
+                    <span class="bg-blue-50 text-blue-800 border border-blue-200 text-xs font-semibold px-3 py-1.5 rounded-full inline-flex items-center gap-1.5">
+                        <span>👥</span>
+                        <span>رد القروبات: مفعل</span>
+                    </span>
+                @else
+                    <span class="bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-semibold px-3 py-1.5 rounded-full inline-flex items-center gap-1.5">
+                        <span>🛡️</span>
+                        <span>رد القروبات: معطل</span>
+                    </span>
+                @endif
+            </div>
         </div>
 
         <form method="GET" action="{{ route('pages.second') }}" class="mt-4 flex flex-col sm:flex-row gap-2.5">
@@ -35,7 +49,7 @@
                 type="text"
                 name="message"
                 value="{{ $customerMessage }}"
-                placeholder="جرّب رسالة العميل (مثال: صدام امامي كامري 25 أو رقم صنف)..."
+                placeholder="جرّب رسالة العميل (مثال: فلتر زيت هايلكس 25 أو صدام امامي كامري 25)..."
                 class="flex-1 border border-slate-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-600"
             >
             <button
@@ -49,8 +63,9 @@
     <!-- نتائج الفحص التجريبي -->
     @if($customerMessage)
         @php
-            $directMin  = (int) ($botSettings['confidence_direct_threshold'] ?? 80);
-            $suggestMin = (int) ($botSettings['confidence_suggest_threshold'] ?? 40);
+            $confidenceEnabled = ($botSettings['enable_confidence_system'] ?? '1') === '1';
+            $directMin  = $confidenceEnabled ? (int) ($botSettings['confidence_direct_threshold'] ?? 80) : 1;
+            $suggestMin = $confidenceEnabled ? (int) ($botSettings['confidence_suggest_threshold'] ?? 40) : 1;
         @endphp
         <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
             <h3 class="font-bold text-slate-800">نتيجة الفحص ونسبة التطابق:</h3>
@@ -58,7 +73,7 @@
             @forelse($matchedItems as $item)
                 @php
                     $score = (int) ($item->confidence_score ?? 100);
-                    $isDirect = $score >= $directMin;
+                    $isDirect = !$confidenceEnabled || $score >= $directMin;
                 @endphp
                 <div class="p-4 {{ $isDirect ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200' }} border rounded-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                     <div>
@@ -79,7 +94,7 @@
                             {{ $score }}% مطابقة
                         </span>
                         <span class="text-xs px-2.5 py-1 rounded-full font-semibold {{ $isDirect ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900' }}">
-                            {{ $isDirect ? 'إجابة مباشرة' : 'سؤال: هل تقصد؟' }}
+                            {{ $isDirect ? '✅ إجابة مباشرة بالتوفر' : '🤔 سؤال: هل تقصد؟' }}
                         </span>
                     </div>
                 </div>
@@ -130,6 +145,14 @@
                 <code class="font-bold text-indigo-700 block">{part}</code>
                 <span class="text-slate-600 text-[11px]">القطعة المطلوبة</span>
             </button>
+            <button type="button" onclick="copyTag('{category}')" class="bg-white hover:bg-indigo-100 border border-indigo-200 rounded-lg p-2 text-right transition">
+                <code class="font-bold text-indigo-700 block">{category}</code>
+                <span class="text-slate-600 text-[11px]">ماركة السيارة</span>
+            </button>
+            <button type="button" onclick="copyTag('{client_name}')" class="bg-white hover:bg-indigo-100 border border-indigo-200 rounded-lg p-2 text-right transition">
+                <code class="font-bold text-indigo-700 block">{client_name}</code>
+                <span class="text-slate-600 text-[11px]">اسم المتجر</span>
+            </button>
             <button type="button" onclick="copyTag('{suggested_item}')" class="bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg p-2 text-right transition">
                 <code class="font-bold text-amber-800 block">{suggested_item}</code>
                 <span class="text-slate-700 text-[11px]">الصنف المقترح</span>
@@ -163,6 +186,12 @@
             </div>
         @endif
 
+        @if(session('error'))
+            <div class="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-2.5 rounded-lg mb-4 text-sm font-semibold">
+                ❌ {{ session('error') }}
+            </div>
+        @endif
+
         <form action="{{ route('pages.second.settings') }}" method="POST" class="space-y-6">
             @csrf
 
@@ -186,43 +215,68 @@
             <div class="p-4 bg-emerald-50/50 rounded-xl border border-emerald-200 flex items-center justify-between gap-4">
                 <div>
                     <label for="allow_group_replies" class="font-bold text-slate-800 text-sm block cursor-pointer">
-                        تفعيل التفاعل في المجموعات (القروبات)
+                        👥 تفعيل التفاعل في المجموعات (القروبات)
                     </label>
                     <p class="text-xs text-slate-600 mt-0.5">عند تعطيل الخيار، يتجاهل البوت أي رسائل ترد داخل المجموعات بشكل كامل.</p>
                 </div>
-                <input type="hidden" name="allow_group_replies" value="0">
-                <input type="checkbox" id="allow_group_replies" name="allow_group_replies" value="1"
-                       {{ ($botSettings['allow_group_replies'] ?? '0') === '1' ? 'checked' : '' }}
-                       class="w-5 h-5 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer">
+                <div class="flex items-center">
+                    <input type="hidden" name="allow_group_replies" value="0">
+                    <input type="checkbox" id="allow_group_replies" name="allow_group_replies" value="1"
+                           {{ ($botSettings['allow_group_replies'] ?? '0') === '1' ? 'checked' : '' }}
+                           class="w-6 h-6 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer">
+                </div>
             </div>
 
-            <!-- نسب التطابق وخانة هل تقصد -->
+            <!-- إعدادات حساسية التطابق والشك مع زر التفعيل والإيقاف -->
             <div class="p-5 bg-indigo-50/40 rounded-xl border border-indigo-200 space-y-4">
-                <h4 class="text-sm font-bold text-indigo-950">إعدادات حساسية التطابق والشك</h4>
-                
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="flex items-center justify-between gap-4 border-b border-indigo-100 pb-3">
                     <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1">حد الإجابة المباشرة بالتوفر والسعر (%)</label>
-                        <input type="number" min="1" max="100" name="confidence_direct_threshold"
-                               value="{{ $botSettings['confidence_direct_threshold'] ?? '80' }}"
-                               class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-600 font-bold text-emerald-700">
-                        <span class="text-[11px] text-slate-500 mt-1 block">يرد البوت فوراً عند بلوغ هذا الحد (الافتراضي: 80%).</span>
+                        <label for="enable_confidence_system" class="text-sm font-bold text-indigo-950 block cursor-pointer">
+                            🎯 تفعيل نظام حساسية التطابق وسؤال "هل تقصد؟"
+                        </label>
+                        <p class="text-xs text-slate-600 mt-0.5">
+                            عند <strong>التفعيل</strong> يعتمد البوت على النسب المئوية ويسأل "هل تقصد؟" عند الشك، وعند <strong>الإيقاف</strong> يرد مباشرة بالتوفر والسعر للأصناف المطابقة.
+                        </p>
                     </div>
-
-                    <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1">الحد الأدنى لسؤال "هل تقصد؟" (%)</label>
-                        <input type="number" min="1" max="100" name="confidence_suggest_threshold"
-                               value="{{ $botSettings['confidence_suggest_threshold'] ?? '40' }}"
-                               class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-600 font-bold text-amber-700">
-                        <span class="text-[11px] text-slate-500 mt-1 block">يطرح الاقتراح إذا كانت الدقة بين هذا الحد والحد المباشر.</span>
+                    <div class="flex items-center">
+                        <input type="hidden" name="enable_confidence_system" value="0">
+                        <input
+                            type="checkbox"
+                            id="enable_confidence_system"
+                            name="enable_confidence_system"
+                            value="1"
+                            onchange="document.getElementById('confidenceFieldsBox').style.opacity = this.checked ? '1' : '0.45';"
+                            {{ ($botSettings['enable_confidence_system'] ?? '1') === '1' ? 'checked' : '' }}
+                            class="w-6 h-6 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                        >
                     </div>
                 </div>
 
-                <div>
-                    <label class="block text-xs font-bold text-slate-700 mb-1">صيغة رسالة الاقتراح (هل تقصد؟)</label>
-                    <textarea name="reply_did_you_mean" rows="2"
-                              placeholder="هل تقصد ({suggested_item}) لسيارة {car} موديل {year}؟ رد بـ (نعم) للتأكيد."
-                              class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-600">{{ $botSettings['reply_did_you_mean'] ?? '' }}</textarea>
+                <div id="confidenceFieldsBox" class="space-y-4 transition-opacity" style="opacity: {{ ($botSettings['enable_confidence_system'] ?? '1') === '1' ? '1' : '0.45' }};">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 mb-1">حد الإجابة المباشرة بالتوفر والسعر (%)</label>
+                            <input type="number" min="1" max="100" name="confidence_direct_threshold"
+                                   value="{{ $botSettings['confidence_direct_threshold'] ?? '80' }}"
+                                   class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-600 font-bold text-emerald-700">
+                            <span class="text-[11px] text-slate-500 mt-1 block">يرد البوت فوراً عند بلوغ هذا الحد (الافتراضي: 80%).</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 mb-1">الحد الأدنى لسؤال "هل تقصد؟" (%)</label>
+                            <input type="number" min="1" max="100" name="confidence_suggest_threshold"
+                                   value="{{ $botSettings['confidence_suggest_threshold'] ?? '40' }}"
+                                   class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-600 font-bold text-amber-700">
+                            <span class="text-[11px] text-slate-500 mt-1 block">يطرح الاقتراح إذا كانت الدقة بين هذا الحد والحد المباشر.</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-slate-700 mb-1">صيغة رسالة الاقتراح (هل تقصد؟)</label>
+                        <textarea name="reply_did_you_mean" rows="2"
+                                  placeholder="هل تقصد ({suggested_item}) لسيارة {car} موديل {year}؟ رد بـ (نعم) للتأكيد."
+                                  class="w-full border border-slate-300 rounded-lg text-sm p-2.5 focus:outline-none focus:border-indigo-600">{{ $botSettings['reply_did_you_mean'] ?? '' }}</textarea>
+                    </div>
                 </div>
             </div>
 
