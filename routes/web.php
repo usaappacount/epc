@@ -2569,12 +2569,9 @@ document.addEventListener('DOMContentLoaded', function () {
 HTML;
 
     if (str_contains($html, '</body>')) {
-        $html = str_replace('</body>', $navScript . "\n</body>", $html);
-    } else {
-        $html .= $navScript;
+        return str_replace('</body>', $navScript . "\n</body>", $html);
     }
-
-    return injectAdminVisualEditor($html);
+    return $html . $navScript;
 }
 
 /**
@@ -3944,6 +3941,9 @@ HTML;
         $clearLogsUrl = route('pages.second.logs.clear');
 
         $contentHtml = <<<HTML
+        <!-- مكتبة SheetJS لتوليد ملفات إكسل حقيقية .xlsx بأعمدة منفصلة -->
+        <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
         <div style="padding:28px;max-width:1400px;margin:0 auto;direction:rtl;background:#f8fafc;min-height:100vh;">
             <!-- الهيدر العلوي العصري -->
             <div style="background:linear-gradient(135deg, #0f172a 0%, #1e293b 100%);color:#ffffff;padding:24px 28px;border-radius:18px;margin-bottom:22px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;box-shadow:0 8px 20px rgba(15,23,42,0.08);">
@@ -3957,7 +3957,7 @@ HTML;
                 </div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
                     <button type="button" id="epc-open-export-modal-btn" style="background:#16a34a;color:#ffffff;border:none;padding:10px 18px;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 10px rgba(22,163,74,0.25);">
-                        📊 تصدير إلى Excel
+                        📊 تصدير إلى Excel (.xlsx)
                     </button>
                     <form method="POST" action="{$clearLogsUrl}" onsubmit="return confirm('هل أنت متأكد من تصفير ومسح سجل الرادار بالكامل؟');" style="margin:0;">
                         <input type="hidden" name="_token" value="{$csrfToken}">
@@ -4053,30 +4053,30 @@ HTML;
             </div>
         </div>
 
-        <!-- نافذة اختيار نوع تصدير الإكسل (عادي / تفصيلي) -->
+        <!-- نافذة اختيار نوع تصدير الإكسل (.xlsx) -->
         <div id="epc-export-choice-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
-            <div style="background:#ffffff;width:100%;max-width:520px;border-radius:18px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.35);">
+            <div style="background:#ffffff;width:100%;max-width:540px;border-radius:18px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.35);">
                 <div style="background:#0f172a;color:#ffffff;padding:18px 22px;display:flex;justify-content:space-between;align-items:center;">
-                    <h3 style="margin:0;font-size:17px;font-weight:800;">📊 اختر نوع التصدير إلى Excel</h3>
+                    <h3 style="margin:0;font-size:17px;font-weight:800;">📊 اختر نوع التصدير إلى ملف Excel (.xlsx)</h3>
                     <button type="button" id="epc-close-export-modal-btn" style="background:transparent;color:#cbd5e1;border:none;font-size:18px;cursor:pointer;font-weight:800;">✕</button>
                 </div>
                 <div style="padding:22px;">
                     <p style="margin:0 0 16px 0;font-size:13px;color:#475569;">
-                        سيتم تصدير <b>الأصناف المفلترة والظاهرة حالياً في الجدول فقط</b> حسب اختيارك:
+                        سيتم تصدير <b>الأصناف المفلترة والظاهرة حالياً في الجدول فقط</b> بصيغة Excel حقيقية (`.xlsx`) بحيث يكون كل عمود في عمود منفصل تماماً:
                     </p>
 
                     <div style="display:flex;flex-direction:column;gap:12px;">
                         <button type="button" id="epc-do-export-normal" style="text-align:right;background:#f0fdf4;border:2px solid #86efac;border-radius:14px;padding:16px;cursor:pointer;transition:all 0.15s;">
-                            <div style="font-size:15px;font-weight:800;color:#166534;margin-bottom:4px;">1️⃣ تصدير عادي (ملخص الجدول بدون تكرار)</div>
+                            <div style="font-size:15px;font-weight:800;color:#166534;margin-bottom:4px;">1️⃣ تصدير عادي (.xlsx) — ملخص الجدول بدون تكرار</div>
                             <div style="font-size:12px;color:#15803d;line-height:1.5;">
-                                يصدر البيانات كما هي ظاهرة في الجدول (العمود A رقم الصنف، العمود B اسم الصنف، حالة التوفر، إجمالي الكمية، مرات الطلب اليومي والمكرر، وتاريخ آخر طلب) بدون تكرار رقم الصنف.
+                                العمود A: رقم الصنف | العمود B: اسم الصنف | العمود C: حالة التوفر | العمود D: إجمالي الكمية المطلوبة | العمود E: مرات الطلب (يومي) | العمود F: مرات الطلب (مكرر) | العمود G: تاريخ آخر طلب.
                             </div>
                         </button>
 
                         <button type="button" id="epc-do-export-detailed" style="text-align:right;background:#eff6ff;border:2px solid #93c5fd;border-radius:14px;padding:16px;cursor:pointer;transition:all 0.15s;">
-                            <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:4px;">2️⃣ تصدير تفصيلي (شامل تكرار جميع الطلبات)</div>
+                            <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:4px;">2️⃣ تصدير تفصيلي (.xlsx) — شامل تكرار جميع الطلبات</div>
                             <div style="font-size:12px;color:#1d4ed8;line-height:1.5;">
-                                يصدر كل عملية طلب في سطر مستقل (إذا تكرر الصنف 100 مرة يظهر 100 مرة بكامل تفاصيله: رقم الصنف، اسم الصنف، الحالة، الكمية المطلوبة، السعر، رقم العميل، التاجر، والتاريخ) بدون إجمالي الكمية ومرات الطلب اليومي.
+                                إذا تكرر طلب الصنف 100 مرة يظهر 100 سطر منفصل (العمود A: رقم الصنف | العمود B: اسم الصنف | العمود C: الحالة | العمود D: الكمية المطلوبة | العمود E: الكمية المتوفرة | العمود F: السعر | العمود G: جوال العميل | العمود H: التاجر | العمود I: المصدر | العمود J: التاريخ والوقت) بدون إجمالي الكمية ومرات الطلب اليومي.
                             </div>
                         </button>
                     </div>
@@ -4266,17 +4266,26 @@ HTML;
                 });
             }
 
-            // 3. دالة تحميل ملف CSV متوافق مع Excel ويدعم العربية
-            function downloadCsvFile(csvLines, filePrefix) {
-                const bom  = '\\uFEFF';
-                const blob = new Blob([bom + csvLines.join('\\r\\n')], { type: 'text/csv;charset=utf-8;' });
-                const url  = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href     = url;
-                link.download = filePrefix + '_' + new Date().toISOString().slice(0, 10) + '.csv';
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
+            // 3. دالة توليد وتحميل ملف إكسل حقيقي (.xlsx) بأعمدة منفصلة واتجاه عربي RTL
+            function downloadRealExcelXlsx(aoaData, colWidths, sheetTitle, filePrefix) {
+                const fileName = filePrefix + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+
+                if (typeof XLSX !== 'undefined') {
+                    const wb = XLSX.utils.book_new();
+                    const ws = XLSX.utils.aoa_to_sheet(aoaData);
+
+                    ws['!cols'] = colWidths.map(w => ({ wch: w }));
+                    if (! wb.Workbook) wb.Workbook = {};
+                    if (! wb.Workbook.Views) wb.Workbook.Views = [{}];
+                    wb.Workbook.Views[0].RTL = true;
+
+                    XLSX.utils.book_append_sheet(wb, ws, sheetTitle);
+                    XLSX.writeFile(wb, fileName);
+                    return;
+                }
+
+                // بديل احتياطي في حال عدم اتصال الإنترنت لتحميل مكتبة SheetJS
+                alert('يرجى التأكد من اتصال الإنترنت لتحميل مكتبة تصدير XLSX.');
             }
 
             if (openExportBtn) {
@@ -4297,14 +4306,13 @@ HTML;
                 });
             }
 
-            // أ) تصدير عادي (كما هو ظاهر في الجدول بدون تكرار للأصناف المفلترة)
+            // أ) تصدير عادي (.xlsx): كل عمود في عمود منفصل كما هو ظاهر في الجدول وبدون تكرار للأصناف المفلترة
             if (btnExportNormal) {
                 btnExportNormal.addEventListener('click', function () {
                     const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
                         .filter(r => r.style.display !== 'none');
 
-                    const csvLines = [];
-                    csvLines.push([
+                    const aoa = [[
                         'رقم الصنف',
                         'اسم الصنف',
                         'حالة التوفر',
@@ -4312,34 +4320,37 @@ HTML;
                         'مرات الطلب (يومي)',
                         'مرات الطلب (مكرر)',
                         'تاريخ آخر طلب'
-                    ].map(h => '"' + h.replace(/"/g, '""') + '"').join(','));
+                    ]];
 
                     visibleRows.forEach(function (r) {
-                        const rowCols = [
-                            r.getAttribute('data-part') || '',
-                            r.getAttribute('data-name') || '',
-                            r.getAttribute('data-status-text') || '',
-                            r.getAttribute('data-qty') || '0',
-                            r.getAttribute('data-days') || '0',
-                            r.getAttribute('data-detailed') || '0',
-                            r.getAttribute('data-date') || ''
-                        ];
-                        csvLines.push(rowCols.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(','));
+                        aoa.push([
+                            String(r.getAttribute('data-part') || ''),
+                            String(r.getAttribute('data-name') || ''),
+                            String(r.getAttribute('data-status-text') || ''),
+                            Number(r.getAttribute('data-qty') || 0),
+                            Number(r.getAttribute('data-days') || 0),
+                            Number(r.getAttribute('data-detailed') || 0),
+                            String(r.getAttribute('data-date') || '')
+                        ]);
                     });
 
                     exportModal.style.display = 'none';
-                    downloadCsvFile(csvLines, 'radar_summary_export');
+                    downloadRealExcelXlsx(
+                        aoa,
+                        [22, 35, 26, 22, 18, 18, 22],
+                        'ملخص الأصناف المطلوبة',
+                        'radar_summary_export'
+                    );
                 });
             }
 
-            // ب) تصدير تفصيلي (مع تكرار كل عملية طلب للصنف وبدون إجمالي الكمية ومرات الطلب اليومي)
+            // ب) تصدير تفصيلي (.xlsx): كل عملية طلب في سطر مستقل وبأعمدة منفصلة (بدون إجمالي الكمية ومرات الطلب اليومي)
             if (btnExportDetail) {
                 btnExportDetail.addEventListener('click', function () {
                     const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
                         .filter(r => r.style.display !== 'none');
 
-                    const csvLines = [];
-                    csvLines.push([
+                    const aoa = [[
                         'رقم الصنف',
                         'اسم الصنف',
                         'الحالة وقت الطلب',
@@ -4350,7 +4361,7 @@ HTML;
                         'المتجر / التاجر',
                         'المصدر',
                         'التاريخ والوقت'
-                    ].map(h => '"' + h.replace(/"/g, '""') + '"').join(','));
+                    ]];
 
                     visibleRows.forEach(function (r) {
                         const partKey = r.getAttribute('data-part-key') || '';
@@ -4359,24 +4370,28 @@ HTML;
 
                         itemObj.records.forEach(function (rec) {
                             const statusAr = rec.status === 'available' ? 'متوفر' : 'غير متوفر';
-                            const rowCols = [
-                                itemObj.part_number || '',
-                                itemObj.item_name || '',
+                            aoa.push([
+                                String(itemObj.part_number || ''),
+                                String(itemObj.item_name || ''),
                                 statusAr,
-                                rec.req_qty || '1',
-                                rec.avail_qty || '0',
-                                rec.price || '—',
-                                rec.customer || '',
-                                rec.merchant || '',
-                                rec.source || '',
-                                rec.date || ''
-                            ];
-                            csvLines.push(rowCols.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(','));
+                                Number(rec.req_qty || 1),
+                                Number(rec.avail_qty || 0),
+                                String(rec.price || '—'),
+                                String(rec.customer || ''),
+                                String(rec.merchant || ''),
+                                String(rec.source || ''),
+                                String(rec.date || '')
+                            ]);
                         });
                     });
 
                     exportModal.style.display = 'none';
-                    downloadCsvFile(csvLines, 'radar_detailed_export');
+                    downloadRealExcelXlsx(
+                        aoa,
+                        [22, 35, 18, 16, 16, 14, 20, 22, 16, 22],
+                        'التقرير التفصيلي للطلبات',
+                        'radar_detailed_export'
+                    );
                 });
             }
         })();
@@ -4561,54 +4576,4 @@ HTML;
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
-    // مسارات حفظ واستعادة تعديلات الواجهة المرئية بالماوس للأدمن
-    Route::post('/ui-customizations/save', function (Request $request) {
-        if (auth()->user()->role !== 'admin') abort(403);
-
-        if (!Schema::hasTable('ui_customizations')) {
-            Schema::create('ui_customizations', function (Blueprint $table) {
-                $table->id();
-                $table->string('page_path')->index();
-                $table->string('selector');
-                $table->text('text_content')->nullable();
-                $table->string('placeholder')->nullable();
-                $table->text('styles')->nullable();
-                $table->timestamps();
-                $table->unique(['page_path', 'selector']);
-            });
-        }
-
-        $pagePath = trim((string) $request->input('page_path', '/'));
-        $selector = trim((string) $request->input('selector', ''));
-        if ($selector === '') {
-            return response()->json(['status' => 'error'], 422);
-        }
-
-        DB::table('ui_customizations')->updateOrInsert(
-            ['page_path' => $pagePath, 'selector' => $selector],
-            [
-                'text_content' => $request->input('text_content'),
-                'placeholder'  => $request->input('placeholder'),
-                'styles'       => json_encode($request->input('styles', []), JSON_UNESCAPED_UNICODE),
-                'updated_at'   => now(),
-                'created_at'   => now(),
-            ]
-        );
-
-        return response()->json(['status' => 'success']);
-    })->name('ui.customizations.save');
-
-    Route::post('/ui-customizations/reset', function (Request $request) {
-        if (auth()->user()->role !== 'admin') abort(403);
-
-        if (Schema::hasTable('ui_customizations')) {
-            $query = DB::table('ui_customizations')->where('page_path', $request->input('page_path', '/'));
-            if ($request->filled('selector')) {
-                $query->where('selector', $request->input('selector'));
-            }
-            $query->delete();
-        }
-
-        return response()->json(['status' => 'success']);
-    })->name('ui.customizations.reset');
 });
