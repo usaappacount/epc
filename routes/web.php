@@ -1395,81 +1395,116 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
     $mimeType   = '';
     $mediaUrl   = '';
     $base64Data = '';
-    $messageId  = data_get($payload, 'data.key.id')
-               ?? data_get($payload, 'data.id')
-               ?? data_get($payload, 'data.message.id')
-               ?? data_get($payload, 'message_id')
-               ?? data_get($payload, 'id')
-               ?? '';
+    $msgType    = strtolower((string) (
+        data_get($payload, 'type')
+        ?? data_get($payload, 'data.type')
+        ?? data_get($payload, 'data.message.type')
+        ?? data_get($payload, 'message_type')
+        ?? data_get($payload, 'data.media_type')
+        ?? ''
+    ));
 
-    // 1. إذا أرسل الويب هوك الملف كـ Multipart File مباشر في الطلب
-    if (request()->hasFile('file') || request()->hasFile('document') || request()->hasFile('media')) {
-        $upFile = request()->file('file') ?? request()->file('document') ?? request()->file('media');
-        if ($upFile && $upFile->isValid()) {
-            $rows = parseUploadedSpreadsheetFileRows($upFile->getRealPath());
-            if (!empty($rows)) {
-                return extractNormalizedInquiryRowsFromSheet($rows);
+    // 1. إذا وصل الملف كـ Multipart مباشر في طلب الويب هوك (الحقل media أو file أو document)
+    foreach (['media', 'file', 'document'] as $fileKey) {
+        if (request()->hasFile($fileKey)) {
+            $upFile = request()->file($fileKey);
+            if ($upFile && $upFile->isValid()) {
+                $rows = parseUploadedSpreadsheetFileRows($upFile->getRealPath());
+                if (!empty($rows)) {
+                    return extractNormalizedInquiryRowsFromSheet($rows);
+                }
             }
         }
     }
 
-    // 2. مسح شامل وعميق لكل عنصر في الـ Payload لالتقاط أي Base64 أو رابط أو اسم ملف إكسل
-    array_walk_recursive($payload, function ($value, $key) use (&$fileName, &$mimeType, &$mediaUrl, &$base64Data) {
+    // 2. التقاط مباشر لحقول GreatWhats القياسية (media_url / media / url)
+    $directUrlCandidates = [
+        data_get($payload, 'media_url'),
+        data_get($payload, 'data.media_url'),
+        data_get($payload, 'data.message.media_url'),
+        data_get($payload, 'data.media.url'),
+        data_get($payload, 'data.document.url'),
+        data_get($payload, 'data.document.media_url'),
+        data_get($payload, 'media'),
+        data_get($payload, 'data.media'),
+        data_get($payload, 'file_url'),
+        data_get($payload, 'data.file_url'),
+        data_get($payload, 'url'),
+        data_get($payload, 'data.url'),
+    ];
+
+    foreach ($directUrlCandidates as $cand) {
+        if (is_string($cand) && filter_var(trim($cand), FILTER_VALIDATE_URL)) {
+            $mediaUrl = trim($cand);
+            break;
+        }
+    }
+
+    // 3. مسح شامل لأي حقل داخل الـ Payload لالتقاط الرابط أو اسم الملف أو الـ Base64
+    array_walk_recursive($payload, function ($value, $key) use (&$fileName, &$mimeType, &$mediaUrl, &$base64Data, &$msgType) {
         if (!is_string($value) && !is_numeric($value)) return;
         $valStr = trim((string) $value);
         if ($valStr === '') return;
         $kLower = strtolower((string) $key);
 
-        if ($fileName === '' && preg_match('/[^\/\\\\]+\.(xlsx|xls|csv)$/i', $valStr, $mFile)) {
+        if ($msgType === '' && in_array($kLower, ['type', 'message_type', 'mediatype', 'media_type'], true) && in_array(strtolower($valStr), ['document', 'file', 'spreadsheet'], true)) {
+            $msgType = 'document';
+        }
+
+        if ($fileName === '' && preg_match('/[^\/\\\\]+\.(xlsx|xls|csv)$/i', $valStr)) {
             $fileName = $valStr;
         }
-        if ($mimeType === '' && in_array($kLower, ['mimetype', 'mime_type', 'content_type', 'type'], true) && (
-            str_contains(strtolower($valStr), 'spreadsheet') ||
-            str_contains(strtolower($valStr), 'excel') ||
-            str_contains(strtolower($valStr), 'csv') ||
-            str_contains(strtolower($valStr), 'officedocument') ||
-            str_contains(strtolower($valStr), 'octet-stream') ||
-            strtolower($valStr) === 'document'
-        )) {
+
+        if ($mimeType === '' && in_array($kLower, ['mimetype', 'mime_type', 'content_type'], true)) {
             $mimeType = $valStr;
         }
+
+        // التقاط أي رابط http/https داخل الحقول المتعلقة بالميديا حتى لو لم ينتهِ بـ .xlsx
         if ($mediaUrl === '' && filter_var($valStr, FILTER_VALIDATE_URL)) {
             if (
-                in_array($kLower, ['media_url', 'mediaurl', 'file_url', 'fileurl', 'document_url', 'download_url', 'url', 'link', 'media', 'directpath'], true) ||
+                in_array($kLower, ['media_url', 'mediaurl', 'file_url', 'fileurl', 'document_url', 'download_url', 'url', 'link', 'media', 'file', 'document'], true) ||
                 preg_match('/\.(xlsx|xls|csv)(\?|$)/i', $valStr) ||
+                str_contains($valStr, 'greatwhats') ||
                 str_contains($valStr, 'whatsapp.net') ||
-                str_contains($valStr, '/media/') ||
-                str_contains($valStr, '/download') ||
-                str_contains($valStr, '/files/')
+                str_contains($valStr, '/media') ||
+                str_contains($valStr, '/files') ||
+                str_contains($valStr, '/storage') ||
+                str_contains($valStr, '/download')
             ) {
-                if (!str_contains($valStr, 'mmg.whatsapp.net') || $mediaUrl === '') {
-                    $mediaUrl = $valStr;
-                }
+                $mediaUrl = $valStr;
             }
         }
 
-        // التقاط أي نص Base64 يمثل ملف ZIP/XLSX (يبدأ بـ UEsDB) أو XLS (0M8R4) أينما كان موقعه في الـ JSON
         $cleanB64 = preg_replace('/^data:[^;]+;base64,/', '', $valStr);
         if ($base64Data === '' && strlen($cleanB64) > 80) {
             if (str_starts_with($cleanB64, 'UEsDB') || str_starts_with($cleanB64, '0M8R4')) {
                 $base64Data = $cleanB64;
-            } elseif (in_array($kLower, ['base64', 'media_base64', 'file_base64', 'document_base64', 'buffer', 'filedata', 'content'], true) && !str_contains($cleanB64, ' ')) {
+            } elseif (in_array($kLower, ['base64', 'media_base64', 'file_base64', 'document_base64', 'data'], true) && !str_contains($cleanB64, ' ')) {
                 $base64Data = $cleanB64;
             }
         }
     });
 
     $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
-    $isDocumentMsg = str_contains($rawJson, 'documentMessage')
-                  || str_contains($rawJson, 'documentWithCaptionMessage')
+    $isDocumentMsg = ($msgType === 'document' || $msgType === 'file')
+                  || str_contains($rawJson, 'document')
                   || str_contains($rawJson, 'spreadsheet')
                   || str_contains($rawJson, '.xlsx')
                   || str_contains($rawJson, '.xls')
                   || str_contains($rawJson, '.csv')
                   || $fileName !== ''
-                  || $base64Data !== '';
+                  || $base64Data !== ''
+                  || $mediaUrl !== '';
 
-    if (!$isDocumentMsg) {
+    if (!$isDocumentMsg || ($mediaUrl === '' && $base64Data === '')) {
+        return [];
+    }
+
+    // استبعاد الصور والصوتيات والفيديو الصريحة حتى لا يحاول قراءتها كإكسل
+    if (in_array($msgType, ['image', 'video', 'audio', 'voice', 'sticker'], true) && $fileName === '') {
+        return [];
+    }
+    if (preg_match('/\.(jpg|jpeg|png|gif|webp|mp4|mp3|ogg|pdf|aac)(\?|$)/i', $mediaUrl) && !preg_match('/\.(xlsx|xls|csv)$/i', $fileName)) {
         return [];
     }
 
@@ -1488,7 +1523,7 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
     try {
         $downloaded = false;
 
-        // أ) فك تشفير Base64 إن وجد
+        // أ) إذا كان الملف مرفقاً كـ Base64
         if ($base64Data !== '') {
             $decoded = base64_decode($base64Data, true);
             if ($decoded !== false && strlen($decoded) > 16 && !str_starts_with(trim($decoded), '{')) {
@@ -1497,27 +1532,37 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
             }
         }
 
-        $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
-        $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
-        $sessionId = trim($settings['whatsapp_session_id'] ?? '');
-        $headers   = ['Accept' => '*/*'];
-        if ($apiToken !== '') {
-            $headers['Authorization'] = 'Bearer ' . $apiToken;
-            $headers['X-Api-Key']     = $apiToken;
-        }
+        // ب) تحميل الملف من media_url (نجرب أولاً مع X-API-Key الخاص بـ GreatWhats، ثم بدون هيدرز في حال كان رابط S3/CDN موقع مسبقاً)
+        if (!$downloaded && $mediaUrl !== '') {
+            $apiToken = trim($settings['whatsapp_api_token'] ?? '');
+            $authHeaders = ['Accept' => '*/*'];
+            if ($apiToken !== '') {
+                $authHeaders['X-API-Key']     = $apiToken;
+                $authHeaders['Authorization'] = 'Bearer ' . $apiToken;
+            }
 
-        // ب) تحميل الملف من الرابط المباشر (ومعالجة حالة إرجاع JSON بداخله base64)
-        if (!$downloaded && $mediaUrl !== '' && filter_var($mediaUrl, FILTER_VALIDATE_URL) && !str_contains($mediaUrl, '.enc')) {
-            $resp = Http::withHeaders($headers)->withoutVerifying()->timeout(30)->get($mediaUrl);
+            $resp = Http::withHeaders($authHeaders)->withoutVerifying()->timeout(35)->get($mediaUrl);
+            if (!$resp->successful() && $apiToken !== '') {
+                // إذا كان الرابط على S3 أو CDN ويرفض وجود Authorization header إضافي، نعيد المحاولة بدون هيدر التوكن
+                $resp = Http::withoutVerifying()->timeout(35)->get($mediaUrl);
+            }
+
             if ($resp->successful() && strlen($resp->body()) > 16) {
                 $body = $resp->body();
                 $jsonTry = json_decode($body, true);
                 if (is_array($jsonTry)) {
-                    $b64InJson = data_get($jsonTry, 'base64') ?? data_get($jsonTry, 'data.base64') ?? data_get($jsonTry, 'data') ?? '';
+                    $b64InJson = data_get($jsonTry, 'base64') ?? data_get($jsonTry, 'data.base64') ?? data_get($jsonTry, 'media') ?? '';
+                    $innerUrl  = data_get($jsonTry, 'media_url') ?? data_get($jsonTry, 'data.media_url') ?? data_get($jsonTry, 'url') ?? '';
                     if (is_string($b64InJson) && strlen($b64InJson) > 50) {
                         $dec = base64_decode(preg_replace('/^data:[^;]+;base64,/', '', $b64InJson), true);
                         if ($dec !== false) {
                             file_put_contents($tempFile, $dec);
+                            $downloaded = true;
+                        }
+                    } elseif (is_string($innerUrl) && filter_var($innerUrl, FILTER_VALIDATE_URL)) {
+                        $innerResp = Http::withoutVerifying()->timeout(30)->get($innerUrl);
+                        if ($innerResp->successful() && strlen($innerResp->body()) > 16) {
+                            file_put_contents($tempFile, $innerResp->body());
                             $downloaded = true;
                         }
                     }
@@ -1528,76 +1573,11 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
             }
         }
 
-        // ج) إذا كان الرابط مشفراً (.enc) أو فارغاً، نطلب فك تشفير الميديا من سيرفر الواتساب (GreatWhats / Baileys API)
-        if (!$downloaded && $apiUrl !== '' && $messageId !== '') {
-            $baseApi = preg_replace('#/(send|messages|message|chat|api/send).*$#i', '', $apiUrl);
-            $possibleDownloadEndpoints = [
-                $baseApi . '/download-media',
-                $baseApi . '/messages/download',
-                $baseApi . '/media/download',
-                $baseApi . '/get-media',
-            ];
-            $docObj = data_get($payload, 'data.message.documentMessage')
-                   ?? data_get($payload, 'data.message')
-                   ?? data_get($payload, 'data');
-
-            foreach ($possibleDownloadEndpoints as $ep) {
-                try {
-                    $dlResp = Http::withHeaders($headers)->withoutVerifying()->timeout(20)->post($ep, [
-                        'session_id' => $sessionId,
-                        'sessionId'  => $sessionId,
-                        'message_id' => $messageId,
-                        'messageId'  => $messageId,
-                        'id'         => $messageId,
-                        'message'    => $docObj,
-                        'data'       => $docObj,
-                    ]);
-                    if ($dlResp->successful()) {
-                        $dlJson = $dlResp->json();
-                        $b64    = data_get($dlJson, 'base64') ?? data_get($dlJson, 'data.base64') ?? data_get($dlJson, 'media') ?? '';
-                        if (is_string($b64) && strlen($b64) > 60) {
-                            $dec = base64_decode(preg_replace('/^data:[^;]+;base64,/', '', $b64), true);
-                            if ($dec !== false && strlen($dec) > 16) {
-                                file_put_contents($tempFile, $dec);
-                                $downloaded = true;
-                                break;
-                            }
-                        }
-                    }
-                } catch (\Throwable $e) {}
-            }
-        }
-
-        // د) فك تشفير ملف واتساب المباشر (.enc) تلقائياً باستخدام mediaKey إذا كان متوفراً في الـ Payload
-        if (!$downloaded && $mediaUrl !== '' && str_contains($mediaUrl, 'mmg.whatsapp.net')) {
-            $mediaKeyB64 = data_get($payload, 'data.message.documentMessage.mediaKey')
-                        ?? data_get($payload, 'data.documentMessage.mediaKey')
-                        ?? data_get($payload, 'data.mediaKey')
-                        ?? '';
-            if (is_string($mediaKeyB64) && $mediaKeyB64 !== '' && function_exists('hash_hkdf') && function_exists('openssl_decrypt')) {
-                $encResp = Http::withoutVerifying()->timeout(25)->get($mediaUrl);
-                if ($encResp->successful() && strlen($encResp->body()) > 32) {
-                    $mediaKey = base64_decode($mediaKeyB64, true);
-                    if ($mediaKey !== false && strlen($mediaKey) === 32) {
-                        $expanded  = hash_hkdf('sha256', $mediaKey, 112, 'WhatsApp Document Keys', '');
-                        $iv        = substr($expanded, 0, 16);
-                        $cipherKey = substr($expanded, 16, 32);
-                        $encBody   = $encResp->body();
-                        $cipherTxt = substr($encBody, 0, -10); // إزالة 10 بايت MAC
-                        $decrypted = @openssl_decrypt($cipherTxt, 'aes-256-cbc', $cipherKey, OPENSSL_RAW_DATA, $iv);
-                        if ($decrypted !== false && strlen($decrypted) > 16) {
-                            file_put_contents($tempFile, $decrypted);
-                            $downloaded = true;
-                        }
-                    }
-                }
-            }
-        }
-
         if (!$downloaded || !file_exists($tempFile)) {
             return [];
         }
 
+        // فحص البصمة الحقيقية للملف المحمل (PK\x03\x04 تعني ملف إكسل .xlsx حقيقي)
         $headBytes = file_get_contents($tempFile, false, null, 0, 8);
         if ($headBytes !== false && str_starts_with($headBytes, "PK\x03\x04") && $ext !== 'xlsx') {
             $newTemp = $tempFile . '.xlsx';
@@ -1865,7 +1845,7 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
 }
 
 /**
- * إرسال ملف إكسل (`.xlsx`) للعميل على الواتساب يحتوي على تسعير الأصناف حسب صلاحياته
+ * إرسال ملف إكسل (.xlsx) للعميل عبر GreatWhats API باستخدام الرفع المباشر Multipart (الحقل media) أو media_url
  */
 function sendWhatsappExcelDocument(array $settings, string $cleanPhone, string $rawSender, $convId, string $filePath, string $fileName, string $caption): void {
     $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
@@ -1876,161 +1856,65 @@ function sendWhatsappExcelDocument(array $settings, string $cleanPhone, string $
         return;
     }
 
-    $publicUrl  = route('public.whatsapp.excel.download', ['file' => basename($filePath)]);
-    $base64File = base64_encode((string) file_get_contents($filePath));
-    $mime       = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
-    $headers = ['Accept' => 'application/json'];
+    $headers = [
+        'Accept' => 'application/json',
+    ];
     if (!empty($apiToken)) {
+        $headers['X-API-Key']     = $apiToken;
         $headers['Authorization'] = 'Bearer ' . $apiToken;
-        $headers['X-Api-Key']     = $apiToken;
     }
 
+    $targetTo = $cleanPhone ?: $rawSender;
+    $sentSuccessfully = false;
+
+    // الطريقة 1: الرفع المباشر (multipart/form-data) عبر الحقل media كما في توثيق GreatWhats الرسمي
     try {
-        Http::withHeaders($headers)->withoutVerifying()->timeout(25)->post($apiUrl, [
-            'session_id'      => $sessionId,
-            'sessionId'       => $sessionId,
-            'session'         => $sessionId,
-            'instance_id'     => $sessionId,
-            'token'           => $apiToken,
-            'api_key'         => $apiToken,
-            'to'              => $cleanPhone,
-            'phone'           => $cleanPhone,
-            'recipient'       => $cleanPhone,
-            'number'          => $cleanPhone,
-            'chatId'          => $rawSender,
-            'conversation_id' => $convId,
-            'type'            => 'document',
-            'media_type'      => 'document',
-            'fileName'        => $fileName,
-            'filename'        => $fileName,
-            'file_name'       => $fileName,
-            'mimetype'        => $mime,
-            'mime_type'       => $mime,
-            'media_url'       => $publicUrl,
-            'file_url'        => $publicUrl,
-            'document'        => $publicUrl,
-            'url'             => $publicUrl,
-            'base64'          => 'data:' . $mime . ';base64,' . $base64File,
-            'file_base64'     => $base64File,
-            'caption'         => $caption,
-            'body'            => $caption . "\n📥 رابط تحميل ملف الإكسل:\n" . $publicUrl,
-            'message'         => $caption . "\n📥 رابط تحميل ملف الإكسل:\n" . $publicUrl,
-            'text'            => $caption . "\n📥 رابط تحميل ملف الإكسل:\n" . $publicUrl,
-        ]);
-    } catch (\Throwable $e) {}
-}
-
-function sendWhatsappLoginOtp(User $user, string $otpCode): bool {
-    $targetPhone = trim((string) $user->phone);
-    $cleanPhone  = normalizeWhatsappDigits($targetPhone);
-    if ($cleanPhone === '') {
-        return false;
-    }
-
-    $userWhatsappSettings = DB::table('user_bot_settings')
-        ->where('user_id', $user->id)
-        ->pluck('value', 'key')
-        ->toArray();
-
-    $apiUrl = trim((string) ($userWhatsappSettings['whatsapp_api_url'] ?? ''));
-    if ($apiUrl === '') {
-        return false;
-    }
-
-    $settings = [
-        'whatsapp_api_url'    => $apiUrl,
-        'whatsapp_api_token'  => trim((string) ($userWhatsappSettings['whatsapp_api_token'] ?? '')),
-        'whatsapp_session_id' => trim((string) ($userWhatsappSettings['whatsapp_session_id'] ?? '')),
-    ];
-
-    $message = "🔐 رمز التحقق الخاص بك لتسجيل الدخول هو: *{$otpCode}*\nيرجى عدم مشاركة هذا الرمز مع أي شخص.";
-    $jid     = $cleanPhone . '@s.whatsapp.net';
-
-    sendWhatsappReplyMessage($settings, $cleanPhone, $jid, null, $message);
-    return true;
-}
-
-function detectGroupAndBroadcastStatus(array $payload): array {
-    $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
-
-    $isBroadcastOrStatus = str_contains($rawJson, '@broadcast')
-                        || str_contains($rawJson, 'status@')
-                        || str_contains($rawJson, '@newsletter');
-
-    $possibleJids = [
-        data_get($payload, 'data.chat_id'),
-        data_get($payload, 'data.chatId'),
-        data_get($payload, 'data.chat.id'),
-        data_get($payload, 'data.key.remoteJid'),
-        data_get($payload, 'data.remoteJid'),
-        data_get($payload, 'data.from'),
-        data_get($payload, 'data.to'),
-        data_get($payload, 'data.group_id'),
-        data_get($payload, 'data.groupId'),
-        data_get($payload, 'data.message.chatId'),
-        data_get($payload, 'data.message.from'),
-        data_get($payload, 'data.message.key.remoteJid'),
-        data_get($payload, 'chatId'),
-        data_get($payload, 'chat_id'),
-        data_get($payload, 'remoteJid'),
-        data_get($payload, 'from'),
-        data_get($payload, 'group_id'),
-        data_get($payload, 'groupId'),
-    ];
-
-    $groupJid = null;
-    foreach ($possibleJids as $jid) {
-        if (is_string($jid) && str_contains($jid, '@g.us')) {
-            $groupJid = $jid;
-            break;
+        $multipartPayload = [
+            'to'      => $targetTo,
+            'type'    => 'document',
+            'caption' => $caption,
+        ];
+        if ($sessionId !== '') {
+            $multipartPayload['session_id'] = $sessionId;
         }
-    }
 
-    $isGroupFlag = data_get($payload, 'data.isGroup')
-                ?? data_get($payload, 'data.is_group')
-                ?? data_get($payload, 'isGroup')
-                ?? data_get($payload, 'is_group')
-                ?? data_get($payload, 'data.message.isGroupMsg')
-                ?? data_get($payload, 'data.chat.isGroup')
-                ?? false;
+        $response = Http::withHeaders($headers)
+            ->withoutVerifying()
+            ->timeout(35)
+            ->attach(
+                'media',
+                file_get_contents($filePath),
+                $fileName,
+                ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']
+            )
+            ->post($apiUrl, $multipartPayload);
 
-    $participant = data_get($payload, 'data.participant')
-                ?? data_get($payload, 'data.key.participant')
-                ?? data_get($payload, 'data.message.participant')
-                ?? data_get($payload, 'data.message.key.participant')
-                ?? data_get($payload, 'data.author')
-                ?? data_get($payload, 'data.message.author')
-                ?? data_get($payload, 'participant')
-                ?? data_get($payload, 'author');
-
-    $isGroup = ($groupJid !== null)
-            || ($isGroupFlag === true || $isGroupFlag === 'true' || $isGroupFlag === 1 || $isGroupFlag === '1')
-            || (!empty($participant))
-            || str_contains($rawJson, '@g.us');
-
-    return [
-        'is_broadcast' => $isBroadcastOrStatus,
-        'is_group'     => $isGroup,
-        'group_jid'    => $groupJid,
-    ];
-}
-
-function isWithinAllowedTimeWindow(?string $startTime, ?string $endTime): bool {
-    $start = trim((string) $startTime);
-    $end   = trim((string) $endTime);
-    if ($start === '' || $end === '') {
-        return true;
-    }
-
-    try {
-        $nowTime = Carbon::now('Asia/Riyadh')->format('H:i');
-        if ($start <= $end) {
-            return ($nowTime >= $start && $nowTime <= $end);
+        if ($response->successful()) {
+            $sentSuccessfully = true;
         }
-        return ($nowTime >= $start || $nowTime <= $end);
     } catch (\Throwable $e) {
-        return true;
+        $sentSuccessfully = false;
+    }
+
+    // الطريقة 2 (الاحتياطية): عبر رابط عام media_url بصيغة JSON نقية مطابقة لتوثيق GreatWhats
+    if (!$sentSuccessfully) {
+        try {
+            $publicUrl = route('public.whatsapp.excel.download', ['file' => basename($filePath)]);
+            $jsonPayload = [
+                'to'        => $targetTo,
+                'type'      => 'document',
+                'media_url' => $publicUrl,
+                'caption'   => $caption,
+            ];
+            if ($sessionId !== '') {
+                $jsonPayload['session_id'] = $sessionId;
+            }
+
+            Http::withHeaders($headers)
+                ->withoutVerifying()
+                ->timeout(25)
+                ->post($apiUrl, $jsonPayload);
+        } catch (\Throwable $e) {}
     }
 }
 
