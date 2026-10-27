@@ -20,6 +20,9 @@ use Carbon\Carbon;
 |--------------------------------------------------------------------------
 */
 try {
+    if (request()->is('api/webhook/*') || request()->is('restore-backup*')) {
+        throw new \Exception('skip_schema_checks');
+    }
     if (!Schema::hasTable('bot_settings')) {
         Schema::create('bot_settings', function (Blueprint $table) {
             $table->string('key')->primary();
@@ -2101,131 +2104,159 @@ function resolveWebhookOwnerUserId(Request $request, array $payload): int {
     return $admin ? $admin->id : 1;
 }
 
-function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $rawSender, $convId, string $replyText): void {
-    $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
-    $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
-    $sessionId = trim($settings['whatsapp_session_id'] ?? '');
-
-    if (!empty($apiUrl) && trim($replyText) !== '') {
-        $headers = ['Accept' => 'application/json'];
-        if (!empty($apiToken)) {
-            $headers['Authorization'] = 'Bearer ' . $apiToken;
-            $headers['X-Api-Key']     = $apiToken;
-            $headers['X-API-Key']     = $apiToken;
-        }
-
-        $maxCharsPerMsg = 3500;
-        $chunks = [];
-        if (mb_strlen($replyText) <= $maxCharsPerMsg) {
-            $chunks[] = $replyText;
-        } else {
-            $lines   = explode("\n", $replyText);
-            $current = '';
-            foreach ($lines as $line) {
-                if (mb_strlen($current . "\n" . $line) > $maxCharsPerMsg && $current !== '') {
-                    $chunks[] = trim($current);
-                    $current  = $line;
-                } else {
-                    $current = $current === '' ? $line : ($current . "\n" . $line);
-                }
-            }
-            if (trim($current) !== '') {
-                $chunks[] = trim($current);
-            }
-        }
-
-        foreach ($chunks as $idx => $chunkText) {
-            try {
-                if ($idx > 0) {
-                    usleep(350000);
-                }
-                Http::withHeaders($headers)->withoutVerifying()->timeout(20)->post($apiUrl, [
-                    'session_id'      => $sessionId,
-                    'sessionId'       => $sessionId,
-                    'session'         => $sessionId,
-                    'instance_id'     => $sessionId,
-                    'token'           => $apiToken,
-                    'api_key'         => $apiToken,
-                    'to'              => $cleanPhone,
-                    'phone'           => $cleanPhone,
-                    'recipient'       => $cleanPhone,
-                    'number'          => $cleanPhone,
-                    'chatId'          => $rawSender,
-                    'conversation_id' => $convId,
-                    'body'            => $chunkText,
-                    'message'         => $chunkText,
-                    'text'            => $chunkText,
-                    'content'         => $chunkText,
-                ]);
-            } catch (\Throwable $e) {}
-        }
+function resolveGreatWhatsMessagesEndpoint(string $apiUrl): string {
+    $url = trim($apiUrl);
+    if ($url === '') {
+        return 'https://greatwhats.com/api/v1/messages';
     }
+    if (str_contains($url, 'greatwhats.com') && !str_contains($url, '/api/v1/messages')) {
+        return 'https://greatwhats.com/api/v1/messages';
+    }
+    return $url;
 }
 
-function sendWhatsappExcelDocument(array $settings, string $cleanPhone, string $rawSender, $convId, string $filePath, string $fileName, string $caption): void {
-    $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
+function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $rawSender, $convId, string $replyText): void {
+    $apiUrl    = resolveGreatWhatsMessagesEndpoint($settings['whatsapp_api_url'] ?? '');
     $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
     $sessionId = trim($settings['whatsapp_session_id'] ?? '');
 
-    if (empty($apiUrl) || !file_exists($filePath)) {
+    if ($apiUrl === '' || trim($replyText) === '') {
         return;
     }
 
-    $headers = ['Accept' => 'application/json'];
-    if (!empty($apiToken)) {
+    $headers = [
+        'Accept'       => 'application/json',
+        'Content-Type' => 'application/json',
+    ];
+    if ($apiToken !== '') {
         $headers['X-API-Key']     = $apiToken;
         $headers['X-Api-Key']     = $apiToken;
         $headers['Authorization'] = 'Bearer ' . $apiToken;
     }
 
-    $targetTo = $cleanPhone ?: $rawSender;
+    $targetTo = str_contains($rawSender, '@g.us') ? $rawSender : normalizeWhatsappDigits($cleanPhone ?: $rawSender);
+
+    $maxCharsPerMsg = 3500;
+    $chunks = [];
+    if (mb_strlen($replyText) <= $maxCharsPerMsg) {
+        $chunks[] = $replyText;
+    } else {
+        $lines   = explode("\n", $replyText);
+        $current = '';
+        foreach ($lines as $line) {
+            if (mb_strlen($current . "\n" . $line) > $maxCharsPerMsg && $current !== '') {
+                $chunks[] = trim($current);
+                $current  = $line;
+            } else {
+                $current = $current === '' ? $line : ($current . "\n" . $line);
+            }
+        }
+        if (trim($current) !== '') {
+            $chunks[] = trim($current);
+        }
+    }
+
+    foreach ($chunks as $idx => $chunkText) {
+        try {
+            if ($idx > 0) {
+                usleep(300000);
+            }
+
+            // الصيغة الرسمية المعتمدة في GreatWhats (POST /api/v1/messages)
+            $payload = [
+                'to'   => (string) $targetTo,
+                'text' => $chunkText,
+            ];
+
+            if ($sessionId !== '') {
+                $payload['session_id'] = is_numeric($sessionId) ? (int) $sessionId : $sessionId;
+            }
+            if (!empty($convId)) {
+                $payload['conversation_id'] = $convId;
+            }
+
+            // إضافة الحقول المرادفة فقط إذا كان المزود مختلفاً عن GreatWhats
+            if (!str_contains($apiUrl, 'greatwhats.com')) {
+                $payload['phone']   = (string) $targetTo;
+                $payload['chatId']  = $rawSender;
+                $payload['body']    = $chunkText;
+                $payload['message'] = $chunkText;
+            }
+
+            Http::withHeaders($headers)
+                ->withoutVerifying()
+                ->timeout(15)
+                ->post($apiUrl, $payload);
+        } catch (\Throwable $e) {}
+    }
+}
+
+function sendWhatsappExcelDocument(array $settings, string $cleanPhone, string $rawSender, $convId, string $filePath, string $fileName, string $caption): void {
+    $apiUrl    = resolveGreatWhatsMessagesEndpoint($settings['whatsapp_api_url'] ?? '');
+    $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
+    $sessionId = trim($settings['whatsapp_session_id'] ?? '');
+
+    if ($apiUrl === '' || !file_exists($filePath)) {
+        return;
+    }
+
+    $headers = ['Accept' => 'application/json'];
+    if ($apiToken !== '') {
+        $headers['X-API-Key']     = $apiToken;
+        $headers['X-Api-Key']     = $apiToken;
+        $headers['Authorization'] = 'Bearer ' . $apiToken;
+    }
+
+    $targetTo = str_contains($rawSender, '@g.us') ? $rawSender : normalizeWhatsappDigits($cleanPhone ?: $rawSender);
     $sentSuccessfully = false;
 
+    // الطريقة 1 حسب دليل GreatWhats: رابط عام media_url (JSON)
     try {
-        $multipartPayload = [
-            'to'      => $targetTo,
-            'type'    => 'document',
-            'caption' => $caption,
+        $publicUrl = url('/whatsapp-exports/' . basename($filePath));
+        $jsonPayload = [
+            'to'        => (string) $targetTo,
+            'type'      => 'document',
+            'media_url' => $publicUrl,
+            'caption'   => $caption,
         ];
         if ($sessionId !== '') {
-            $multipartPayload['session_id'] = $sessionId;
+            $jsonPayload['session_id'] = is_numeric($sessionId) ? (int) $sessionId : $sessionId;
         }
 
-        $response = Http::withHeaders($headers)
+        $respUrl = Http::withHeaders($headers)
             ->withoutVerifying()
-            ->timeout(35)
-            ->attach(
-                'media',
-                file_get_contents($filePath),
-                $fileName,
-                ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']
-            )
-            ->post($apiUrl, $multipartPayload);
+            ->timeout(20)
+            ->post($apiUrl, $jsonPayload);
 
-        if ($response->successful()) {
+        if ($respUrl->successful()) {
             $sentSuccessfully = true;
         }
     } catch (\Throwable $e) {
         $sentSuccessfully = false;
     }
 
+    // الطريقة 2 حسب دليل GreatWhats: رفع مباشر Multipart (الحقل media)
     if (!$sentSuccessfully) {
         try {
-            $publicUrl = route('public.whatsapp.excel.download', ['file' => basename($filePath)]);
-            $jsonPayload = [
-                'to'        => $targetTo,
-                'type'      => 'document',
-                'media_url' => $publicUrl,
-                'caption'   => $caption,
+            $multipartData = [
+                'to'      => (string) $targetTo,
+                'type'    => 'document',
+                'caption' => $caption,
             ];
             if ($sessionId !== '') {
-                $jsonPayload['session_id'] = $sessionId;
+                $multipartData['session_id'] = is_numeric($sessionId) ? (int) $sessionId : $sessionId;
             }
 
             Http::withHeaders($headers)
                 ->withoutVerifying()
-                ->timeout(25)
-                ->post($apiUrl, $jsonPayload);
+                ->timeout(30)
+                ->attach(
+                    'media',
+                    file_get_contents($filePath),
+                    $fileName,
+                    ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']
+                )
+                ->post($apiUrl, $multipartData);
         } catch (\Throwable $e) {}
     }
 }
@@ -2346,7 +2377,7 @@ if (!function_exists('sendWhatsappLoginOtp')) {
                 }
             }
 
-            $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
+            $apiUrl    = resolveGreatWhatsMessagesEndpoint($settings['whatsapp_api_url'] ?? '');
             $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
             $sessionId = trim($settings['whatsapp_session_id'] ?? '');
 
@@ -2354,35 +2385,29 @@ if (!function_exists('sendWhatsappLoginOtp')) {
                 return false;
             }
 
-            $headers = ['Accept' => 'application/json'];
+            $headers = [
+                'Accept'       => 'application/json',
+                'Content-Type' => 'application/json',
+            ];
             if ($apiToken !== '') {
-                $headers['Authorization'] = 'Bearer ' . $apiToken;
-                $headers['X-Api-Key']     = $apiToken;
                 $headers['X-API-Key']     = $apiToken;
+                $headers['X-Api-Key']     = $apiToken;
+                $headers['Authorization'] = 'Bearer ' . $apiToken;
             }
 
             $messageText = "🔐 كود التحقق لتسجيل الدخول هو: *{$otpCode}*";
+            $payload = [
+                'to'   => $cleanPhone,
+                'text' => $messageText,
+            ];
+            if ($sessionId !== '') {
+                $payload['session_id'] = is_numeric($sessionId) ? (int) $sessionId : $sessionId;
+            }
 
             $response = Http::withHeaders($headers)
                 ->withoutVerifying()
-                ->timeout(15)
-                ->post($apiUrl, [
-                    'session_id'  => $sessionId,
-                    'sessionId'   => $sessionId,
-                    'session'     => $sessionId,
-                    'instance_id' => $sessionId,
-                    'token'       => $apiToken,
-                    'api_key'     => $apiToken,
-                    'to'          => $cleanPhone,
-                    'phone'       => $cleanPhone,
-                    'recipient'   => $cleanPhone,
-                    'number'      => $cleanPhone,
-                    'chatId'      => $cleanPhone . '@c.us',
-                    'body'        => $messageText,
-                    'message'     => $messageText,
-                    'text'        => $messageText,
-                    'content'     => $messageText,
-                ]);
+                ->timeout(12)
+                ->post($apiUrl, $payload);
 
             return $response->successful();
         } catch (\Throwable $e) {
@@ -2471,23 +2496,51 @@ function handleWebhook(Request $request) {
     @ignore_user_abort(true);
     @set_time_limit(0);
 
-    $payload   = $request->all();
-    $eventType = $request->input('event', data_get($payload, 'event', 'unknown'));
-
-    if ($eventType === 'test.ping') {
-        return response()->json(['status' => 'pong'], 200);
+    $payload = $request->all();
+    if (empty($payload)) {
+        $rawInput = file_get_contents('php://input');
+        if (!empty($rawInput)) {
+            $decoded = json_decode($rawInput, true);
+            if (is_array($decoded)) {
+                $payload = $decoded;
+            }
+        }
     }
 
-    $fromMe = data_get($payload, 'data.fromMe')
-           ?? data_get($payload, 'data.message.fromMe')
-           ?? data_get($payload, 'data.is_from_me')
-           ?? data_get($payload, 'fromMe', false);
+    $eventType = (string) ($request->input('event') ?? data_get($payload, 'event') ?? data_get($payload, 'type') ?? 'message.received');
 
-    if ($fromMe === true || $fromMe === 'true' || $fromMe === 1 || $eventType === 'message.sent') {
+    // 1. الرد الفوري السريع على فحص GreatWhats وإشعارات الحالة حتى لا يحدث Timeout أبداً
+    if (in_array($eventType, ['test.ping', 'webhook.test', 'ping', 'message.status', 'session.status', 'conversation.updated', 'message.sent', 'message.ack'], true)) {
+        return response()->json(['status' => 'ok', 'event' => $eventType], 200);
+    }
+
+    $direction = strtolower((string) (data_get($payload, 'data.direction') ?? data_get($payload, 'direction') ?? ''));
+    $fromMe    = data_get($payload, 'data.fromMe')
+              ?? data_get($payload, 'data.from_me')
+              ?? data_get($payload, 'data.message.fromMe')
+              ?? data_get($payload, 'data.message.from_me')
+              ?? data_get($payload, 'data.is_from_me')
+              ?? data_get($payload, 'fromMe')
+              ?? data_get($payload, 'from_me', false);
+
+    if ($fromMe === true || $fromMe === 'true' || $fromMe === 1 || $fromMe === '1' || in_array($direction, ['outbound', 'out', 'sent'], true)) {
         return response()->json(['status' => 'ignored_from_me'], 200);
     }
 
     $ownerUserId = resolveWebhookOwnerUserId($request, $payload);
+
+    // 2. إذا كان الطلب حقيقياً من خادم GreatWhats (وليس محاكاة داخلية)، نغلق اتصال الـ HTTP فوراً بكود 200 OK خلال أقل من 0.1 ثانية لمنع خطأ cURL error 28 (8000ms) ثم نكمل المعالجة والرد في الخلفية
+    $isGreatWhatsPush = !$request->expectsJson() || str_contains(strtolower((string) $request->userAgent()), 'curl') || str_contains(strtolower((string) $request->userAgent()), 'greatwhats') || $request->hasHeader('X-Webhook-Signature') || $request->hasHeader('X-GreatWhats-Signature');
+
+    if ($isGreatWhatsPush && function_exists('fastcgi_finish_request')) {
+        http_response_code(200);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['status' => 'accepted_processing_async', 'received' => true]);
+        @ob_flush();
+        @flush();
+        @fastcgi_finish_request();
+    }
+
     $ownerUser   = User::find($ownerUserId);
     $settings    = getUserBotSettings($ownerUserId);
     $isBotActive = ($settings['bot_enabled'] ?? '1') === '1';
@@ -2503,12 +2556,14 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_group_message_completely'], 200);
     }
 
-    DB::table('webhook_logs')->insert([
-        'event_type' => $eventType,
-        'payload'    => json_encode($payload, JSON_UNESCAPED_UNICODE),
-        'created_at' => now(),
-        'updated_at' => now(),
-    ]);
+    try {
+        DB::table('webhook_logs')->insert([
+            'event_type' => $eventType,
+            'payload'    => json_encode($payload, JSON_UNESCAPED_UNICODE),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    } catch (\Throwable $e) {}
 
     $participantPhone = data_get($payload, 'data.participant')
                      ?? data_get($payload, 'data.key.participant')
@@ -2516,17 +2571,43 @@ function handleWebhook(Request $request) {
                      ?? data_get($payload, 'data.author')
                      ?? data_get($payload, 'participant');
 
-    $sender = data_get($payload, 'data.sender_phone')
-           ?? data_get($payload, 'sender_phone')
-           ?? data_get($payload, 'data.message.sender_phone')
-           ?? data_get($payload, 'data.from')
-           ?? data_get($payload, 'from')
-           ?? data_get($payload, 'sender')
-           ?? data_get($payload, 'phone')
-           ?? data_get($payload, 'data.phone')
-           ?? data_get($payload, 'data.sender')
-           ?? data_get($payload, 'data.contact.phone')
-           ?? data_get($payload, 'data.key.remoteJid');
+    // استخراج رقم المرسل بجميع صيغ GreatWhats والـ Webhooks القياسية
+    $senderCandidates = [
+        data_get($payload, 'data.from'),
+        data_get($payload, 'data.sender_phone'),
+        data_get($payload, 'data.phone'),
+        data_get($payload, 'data.sender'),
+        data_get($payload, 'data.contact.phone'),
+        data_get($payload, 'data.contact.number'),
+        data_get($payload, 'data.conversation.contact_phone'),
+        data_get($payload, 'data.conversation.phone'),
+        data_get($payload, 'data.message.from'),
+        data_get($payload, 'data.message.sender_phone'),
+        data_get($payload, 'data.message.phone'),
+        data_get($payload, 'data.key.remoteJid'),
+        data_get($payload, 'from'),
+        data_get($payload, 'sender_phone'),
+        data_get($payload, 'sender'),
+        data_get($payload, 'phone'),
+        data_get($payload, 'contact.phone'),
+    ];
+
+    $sender = null;
+    foreach ($senderCandidates as $cand) {
+        if (is_string($cand) || is_numeric($cand)) {
+            $candStr = trim((string) $cand);
+            if ($candStr !== '') {
+                $sender = $candStr;
+                break;
+            }
+        } elseif (is_array($cand)) {
+            $nestedPhone = $cand['phone'] ?? $cand['number'] ?? $cand['id'] ?? $cand['jid'] ?? null;
+            if (!empty($nestedPhone) && (is_string($nestedPhone) || is_numeric($nestedPhone))) {
+                $sender = trim((string) $nestedPhone);
+                break;
+            }
+        }
+    }
 
     if (!$sender) {
         return response()->json(['status' => 'no_sender_detected'], 200);
@@ -2552,60 +2633,67 @@ function handleWebhook(Request $request) {
 
     $phoneVariants = getPhoneMatchVariants($quotaPhoneKey);
 
-    // 1. فحص هل الرسالة ملف إكسل
-    $excelInquiries = extractExcelItemsFromWhatsappPayload($payload, $settings);
-    $isExcelSource  = !empty($excelInquiries);
+    // 1. استخراج نص الرسالة أولاً (سريع جداً ولا يستهلك وقت اتصال خارجي)
+    $textCandidates = [
+        data_get($payload, 'data.text'),
+        data_get($payload, 'data.body'),
+        data_get($payload, 'data.message_body'),
+        data_get($payload, 'data.content'),
+        data_get($payload, 'data.caption'),
+        data_get($payload, 'data.message.text'),
+        data_get($payload, 'data.message.body'),
+        data_get($payload, 'data.message.content'),
+        data_get($payload, 'data.message.caption'),
+        data_get($payload, 'data.message.conversation'),
+        data_get($payload, 'data.message.extendedTextMessage.text'),
+        data_get($payload, 'data.message.imageMessage.caption'),
+        data_get($payload, 'data.message.documentMessage.caption'),
+        data_get($payload, 'text'),
+        data_get($payload, 'body'),
+        data_get($payload, 'message_body'),
+        data_get($payload, 'content'),
+        data_get($payload, 'caption'),
+        data_get($payload, 'message'),
+        data_get($payload, 'data.message'),
+    ];
+
+    $messageText = '';
+    foreach ($textCandidates as $tc) {
+        if (is_string($tc) && trim($tc) !== '') {
+            $messageText = trim($tc);
+            break;
+        } elseif (is_array($tc)) {
+            $sub = $tc['text'] ?? $tc['body'] ?? $tc['content'] ?? $tc['caption'] ?? $tc['conversation'] ?? data_get($tc, 'extendedTextMessage.text') ?? null;
+            if (is_string($sub) && trim($sub) !== '') {
+                $messageText = trim($sub);
+                break;
+            }
+        }
+    }
+
+    $isExcelSource  = false;
     $isImageSource  = false;
     $requestedItems = [];
 
-    if ($isExcelSource) {
+    // 2. فحص هل الرسالة ملف إكسل
+    $excelInquiries = extractExcelItemsFromWhatsappPayload($payload, $settings);
+    if (!empty($excelInquiries)) {
         $requestedItems = $excelInquiries;
-    } else {
-        // 2. فحص هل الرسالة صورة (كرتون قطعة أو فاتورة أو ورقة أرقام OCR)
+        $isExcelSource  = true;
+    }
+
+    // 3. إذا لم تكن إكسل، نفحص النص المباشر أولاً (أسرع)
+    if (empty($requestedItems) && $messageText !== '') {
+        $requestedItems = extractPartNumbersWithQuantitiesFromText($messageText, $ownerUserId);
+    }
+
+    // 4. إذا لم يوجد نص فيه أرقام، نفحص هل الرسالة صورة (OCR)
+    if (empty($requestedItems)) {
         $imageInquiries = extractImageOcrItemsFromWhatsappPayload($payload, $settings, $ownerUserId);
         if (!empty($imageInquiries)) {
             $requestedItems = $imageInquiries;
             $isImageSource  = true;
         }
-    }
-
-    // 3. إذا لم تكن إكسل ولا صورة تحتوي على أرقام، نفحص النص أو الكابشن المرفق
-    if (empty($requestedItems)) {
-        $messageText = data_get($payload, 'data.message_body')
-                    ?? data_get($payload, 'data.text')
-                    ?? data_get($payload, 'data.body')
-                    ?? data_get($payload, 'data.content')
-                    ?? data_get($payload, 'data.caption')
-                    ?? data_get($payload, 'data.message.conversation')
-                    ?? data_get($payload, 'data.message.extendedTextMessage.text')
-                    ?? data_get($payload, 'data.message.imageMessage.caption')
-                    ?? data_get($payload, 'data.message.documentMessage.caption')
-                    ?? data_get($payload, 'data.message.text')
-                    ?? data_get($payload, 'data.message.body')
-                    ?? data_get($payload, 'data.message.content')
-                    ?? data_get($payload, 'data.message')
-                    ?? data_get($payload, 'message_body')
-                    ?? data_get($payload, 'caption')
-                    ?? data_get($payload, 'body')
-                    ?? data_get($payload, 'message')
-                    ?? data_get($payload, 'text')
-                    ?? data_get($payload, 'content');
-
-        if (is_array($messageText)) {
-            $messageText = $messageText['text']
-                        ?? $messageText['body']
-                        ?? $messageText['content']
-                        ?? $messageText['caption']
-                        ?? $messageText['conversation']
-                        ?? data_get($messageText, 'extendedTextMessage.text')
-                        ?? null;
-        }
-
-        if (!$messageText || !is_string($messageText) || trim($messageText) === '') {
-            return response()->json(['status' => 'no_message_detected'], 200);
-        }
-
-        $requestedItems = extractPartNumbersWithQuantitiesFromText(trim($messageText), $ownerUserId);
     }
 
     if (empty($requestedItems)) {
@@ -2614,7 +2702,7 @@ function handleWebhook(Request $request) {
 
     $logSourceLabel = $isExcelSource ? 'excel' : ($isImageSource ? 'image_ocr' : 'text');
 
-    // إذا كان البوت متوقفاً: يسجل جميع الأصناف في صفحة الأصناف المطلوبة (الرادار) بصمت تام ولا يرد أبداً
+    // إذا كان البوت متوقفاً: يسجل جميع الأصناف في الرادار بصمت تام ولا يرد
     if (!$isBotActive) {
         foreach ($requestedItems as $reqEntry) {
             $pNum   = $reqEntry['part_number'];
@@ -2661,7 +2749,7 @@ function handleWebhook(Request $request) {
     $maxQueriesLimit  = (int) ($settings['max_queries_per_phone'] ?? 0);
     $globalReset      = $settings['quota_reset_period'] ?? 'manual';
     $sessionId        = trim($settings['whatsapp_session_id'] ?? '');
-    $convId           = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
+    $convId           = data_get($payload, 'data.conversation_id') ?? data_get($payload, 'data.conversation.id') ?? data_get($payload, 'conversation_id');
 
     $effectiveResetPeriod = ($whitelistRecord && !empty($whitelistRecord->reset_period) && $whitelistRecord->reset_period !== 'default')
         ? $whitelistRecord->reset_period
@@ -5123,7 +5211,7 @@ HTML;
         return back()->with('success', 'تم تصفير عداد الاستعلامات لجميع الأرقام بنجاح.');
     })->name('pages.second.quotas.reset');
 
-  // 8. إعدادات الربط API والنسخ الاحتياطي (مع دعم الرفع المجزأ لتجاوز حد حجم الملف في السيرفر)
+  // 8. إعدادات الربط API والنسخ الاحتياطي (مع التقاط إجباري للرفع المجزأ لتجاوز حد 2MB في السيرفر)
     Route::get('/page-third', function () {
         if (auth()->user()->role !== 'admin') abort(403);
         $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
@@ -5133,25 +5221,30 @@ HTML;
 
         $chunkScript = <<<HTML
 <script>
-document.addEventListener('DOMContentLoaded', function () {
-    const restoreForm = document.querySelector('form[action*="restore-backup"]');
-    if (!restoreForm) return;
-
-    restoreForm.addEventListener('submit', async function (e) {
-        const fileInput = restoreForm.querySelector('input[type="file"]');
-        if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+(function () {
+    async function handleChunkedBackupRestore(formEl, e) {
+        const fileInput = formEl.querySelector('input[type="file"]');
+        if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+            return;
+        }
 
         e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+
         const file = fileInput.files[0];
-        const submitBtn = restoreForm.querySelector('button[type="submit"]');
+        // تعطيل حقل الملف مؤقتاً حتى لا يرسله المتصفح كـ Multipart أبداً
+        fileInput.disabled = true;
+
+        const submitBtn = formEl.querySelector('button[type="submit"], input[type="submit"]') || formEl.querySelector('button');
         const origText = submitBtn ? submitBtn.innerHTML : 'استعادة';
         if (submitBtn) {
             submitBtn.disabled = true;
-            submitBtn.style.opacity = '0.7';
+            submitBtn.style.opacity = '0.75';
         }
 
-        // تقسيم الملف إلى أجزاء بحجم 1 ميجابايت لتجاوز حد upload_max_filesize (2MB) في PHP
-        const chunkSize = 1024 * 1024;
+        // حجم الجزء 512 كيلوبايت فقط لضمان عبوره تحت أي سقف في Render / PHP / Nginx
+        const chunkSize = 512 * 1024;
         const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
         const uploadId = 'bk_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
 
@@ -5181,6 +5274,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     headers: {
                         'Content-Type': 'application/json',
                         'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
                         'X-CSRF-TOKEN': '{$csrfToken}'
                     },
                     body: JSON.stringify({
@@ -5192,26 +5286,45 @@ document.addEventListener('DOMContentLoaded', function () {
                     })
                 });
 
-                const data = await res.json();
+                const rawText = await res.text();
+                let data = {};
+                try {
+                    data = JSON.parse(rawText);
+                } catch (_) {
+                    throw new Error('استجابة غير متوقعة من السيرفر في الجزء رقم ' + (i + 1));
+                }
+
                 if (!res.ok || data.status === 'error') {
-                    throw new Error(data.message || 'فشل رفع جزء من النسخة الاحتياطية.');
+                    throw new Error(data.message || 'فشل رفع الجزء رقم ' + (i + 1));
                 }
             }
 
             if (submitBtn) {
                 submitBtn.innerHTML = '✅ تمت الاستعادة بنجاح! جاري تحديث الصفحة...';
             }
-            window.location.reload();
+            window.location.href = window.location.pathname + '?restored=1';
         } catch (err) {
             alert('❌ حدث خطأ أثناء استعادة النسخة الاحتياطية: ' + err.message);
+            fileInput.disabled = false;
             if (submitBtn) {
                 submitBtn.disabled = false;
                 submitBtn.style.opacity = '1';
                 submitBtn.innerHTML = origText;
             }
         }
-    });
-});
+    }
+
+    // اعتراض الإرسال في مرحلة الـ Capture قبل أي كود آخر في الصفحة
+    document.addEventListener('submit', function (e) {
+        const form = e.target;
+        if (!form || form.tagName !== 'FORM') return;
+        const action = (form.getAttribute('action') || '').toLowerCase();
+        const hasBackupInput = form.querySelector('input[name="backup_file"], input[accept*=".sqlite"]');
+        if (action.includes('restore-backup') || hasBackupInput) {
+            handleChunkedBackupRestore(form, e);
+        }
+    }, true);
+})();
 </script>
 HTML;
 
@@ -5237,14 +5350,28 @@ HTML;
     Route::post('/restore-backup', function (Request $request) {
         if (auth()->user()->role !== 'admin') abort(403);
 
+        @ignore_user_abort(true);
+        @set_time_limit(0);
+
         $targetPath = config('database.connections.sqlite.database', database_path('database.sqlite'));
 
+        $payload = $request->all();
+        if (empty($payload)) {
+            $raw = file_get_contents('php://input');
+            if (!empty($raw)) {
+                $dec = json_decode($raw, true);
+                if (is_array($dec)) {
+                    $payload = $dec;
+                }
+            }
+        }
+
         // 1. استقبال الأجزاء المرفوعة (Chunked Base64 Upload) لتجاوز قيود حجم الملف في PHP
-        if ($request->boolean('chunk_upload')) {
-            $uploadId    = preg_replace('/[^a-zA-Z0-9_\-]/', '', (string) $request->input('upload_id', 'temp'));
-            $chunkIndex  = (int) $request->input('chunk_index', 0);
-            $totalChunks = (int) $request->input('total_chunks', 1);
-            $chunkData   = (string) $request->input('chunk_data', '');
+        if (!empty($payload['chunk_upload'])) {
+            $uploadId    = preg_replace('/[^a-zA-Z0-9_\-]/', '', (string) ($payload['upload_id'] ?? 'temp'));
+            $chunkIndex  = (int) ($payload['chunk_index'] ?? 0);
+            $totalChunks = (int) ($payload['total_chunks'] ?? 1);
+            $chunkData   = (string) ($payload['chunk_data'] ?? '');
 
             $tempDir = storage_path('app/temp_backups');
             if (!is_dir($tempDir)) {
