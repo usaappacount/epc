@@ -1395,14 +1395,32 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
     $mimeType   = '';
     $mediaUrl   = '';
     $base64Data = '';
+    $messageId  = data_get($payload, 'data.key.id')
+               ?? data_get($payload, 'data.id')
+               ?? data_get($payload, 'data.message.id')
+               ?? data_get($payload, 'message_id')
+               ?? data_get($payload, 'id')
+               ?? '';
 
+    // 1. إذا أرسل الويب هوك الملف كـ Multipart File مباشر في الطلب
+    if (request()->hasFile('file') || request()->hasFile('document') || request()->hasFile('media')) {
+        $upFile = request()->file('file') ?? request()->file('document') ?? request()->file('media');
+        if ($upFile && $upFile->isValid()) {
+            $rows = parseUploadedSpreadsheetFileRows($upFile->getRealPath());
+            if (!empty($rows)) {
+                return extractNormalizedInquiryRowsFromSheet($rows);
+            }
+        }
+    }
+
+    // 2. مسح شامل وعميق لكل عنصر في الـ Payload لالتقاط أي Base64 أو رابط أو اسم ملف إكسل
     array_walk_recursive($payload, function ($value, $key) use (&$fileName, &$mimeType, &$mediaUrl, &$base64Data) {
         if (!is_string($value) && !is_numeric($value)) return;
         $valStr = trim((string) $value);
         if ($valStr === '') return;
         $kLower = strtolower((string) $key);
 
-        if ($fileName === '' && in_array($kLower, ['filename', 'file_name', 'title', 'name', 'caption'], true) && preg_match('/\.(xlsx|xls|csv)$/i', $valStr)) {
+        if ($fileName === '' && preg_match('/[^\/\\\\]+\.(xlsx|xls|csv)$/i', $valStr, $mFile)) {
             $fileName = $valStr;
         }
         if ($mimeType === '' && in_array($kLower, ['mimetype', 'mime_type', 'content_type', 'type'], true) && (
@@ -1410,27 +1428,32 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
             str_contains(strtolower($valStr), 'excel') ||
             str_contains(strtolower($valStr), 'csv') ||
             str_contains(strtolower($valStr), 'officedocument') ||
-            str_contains(strtolower($valStr), 'octet-stream')
+            str_contains(strtolower($valStr), 'octet-stream') ||
+            strtolower($valStr) === 'document'
         )) {
             $mimeType = $valStr;
         }
         if ($mediaUrl === '' && filter_var($valStr, FILTER_VALIDATE_URL)) {
             if (
-                in_array($kLower, ['media_url', 'mediaurl', 'file_url', 'fileurl', 'document_url', 'download_url', 'url', 'link', 'media'], true) ||
+                in_array($kLower, ['media_url', 'mediaurl', 'file_url', 'fileurl', 'document_url', 'download_url', 'url', 'link', 'media', 'directpath'], true) ||
                 preg_match('/\.(xlsx|xls|csv)(\?|$)/i', $valStr) ||
-                str_contains($valStr, 'mmg.whatsapp.net')
+                str_contains($valStr, 'whatsapp.net') ||
+                str_contains($valStr, '/media/') ||
+                str_contains($valStr, '/download') ||
+                str_contains($valStr, '/files/')
             ) {
-                $mediaUrl = $valStr;
+                if (!str_contains($valStr, 'mmg.whatsapp.net') || $mediaUrl === '') {
+                    $mediaUrl = $valStr;
+                }
             }
         }
-        if ($base64Data === '' && (
-            in_array($kLower, ['base64', 'media_base64', 'file_base64', 'data', 'body', 'content', 'file'], true) ||
-            str_starts_with($valStr, 'data:application/')
-        )) {
-            $cleanB64 = preg_replace('/^data:[^;]+;base64,/', '', $valStr);
-            if (strlen($cleanB64) > 100 && (str_starts_with($cleanB64, 'UEsDB') || str_starts_with($cleanB64, '0M8R4'))) {
+
+        // التقاط أي نص Base64 يمثل ملف ZIP/XLSX (يبدأ بـ UEsDB) أو XLS (0M8R4) أينما كان موقعه في الـ JSON
+        $cleanB64 = preg_replace('/^data:[^;]+;base64,/', '', $valStr);
+        if ($base64Data === '' && strlen($cleanB64) > 80) {
+            if (str_starts_with($cleanB64, 'UEsDB') || str_starts_with($cleanB64, '0M8R4')) {
                 $base64Data = $cleanB64;
-            } elseif (in_array($kLower, ['base64', 'media_base64', 'file_base64'], true) && strlen($cleanB64) > 60) {
+            } elseif (in_array($kLower, ['base64', 'media_base64', 'file_base64', 'document_base64', 'buffer', 'filedata', 'content'], true) && !str_contains($cleanB64, ' ')) {
                 $base64Data = $cleanB64;
             }
         }
@@ -1439,12 +1462,14 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
     $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
     $isDocumentMsg = str_contains($rawJson, 'documentMessage')
                   || str_contains($rawJson, 'documentWithCaptionMessage')
+                  || str_contains($rawJson, 'spreadsheet')
+                  || str_contains($rawJson, '.xlsx')
+                  || str_contains($rawJson, '.xls')
+                  || str_contains($rawJson, '.csv')
                   || $fileName !== ''
-                  || $mimeType !== ''
-                  || $base64Data !== ''
-                  || preg_match('/\.(xlsx|xls|csv)/i', $rawJson);
+                  || $base64Data !== '';
 
-    if (!$isDocumentMsg || ($mediaUrl === '' && $base64Data === '')) {
+    if (!$isDocumentMsg) {
         return [];
     }
 
@@ -1455,39 +1480,117 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
 
     $ext = strtolower(pathinfo((string) $fileName, PATHINFO_EXTENSION));
     if (!in_array($ext, ['xlsx', 'xls', 'csv'], true)) {
-        if (str_contains(strtolower($mimeType), 'csv') || preg_match('/\.csv(\?|$)/i', $mediaUrl)) {
-            $ext = 'csv';
-        } elseif (str_contains(strtolower($mimeType), 'ms-excel') || preg_match('/\.xls(\?|$)/i', $mediaUrl)) {
-            $ext = 'xls';
-        } else {
-            $ext = 'xlsx';
-        }
+        $ext = str_contains(strtolower($mimeType), 'csv') ? 'csv' : 'xlsx';
     }
 
     $tempFile = $tempDir . DIRECTORY_SEPARATOR . 'wa_inq_' . time() . '_' . uniqid() . '.' . $ext;
 
     try {
         $downloaded = false;
+
+        // أ) فك تشفير Base64 إن وجد
         if ($base64Data !== '') {
-            $cleanBase64 = preg_replace('/^data:[^;]+;base64,/', '', $base64Data);
-            $decoded     = base64_decode($cleanBase64, true);
-            if ($decoded !== false && strlen($decoded) > 16) {
+            $decoded = base64_decode($base64Data, true);
+            if ($decoded !== false && strlen($decoded) > 16 && !str_starts_with(trim($decoded), '{')) {
                 file_put_contents($tempFile, $decoded);
                 $downloaded = true;
             }
         }
 
-        if (!$downloaded && $mediaUrl !== '' && filter_var($mediaUrl, FILTER_VALIDATE_URL)) {
-            $apiToken = trim($settings['whatsapp_api_token'] ?? '');
-            $headers  = [];
-            if ($apiToken !== '') {
-                $headers['Authorization'] = 'Bearer ' . $apiToken;
-                $headers['X-Api-Key']     = $apiToken;
-            }
+        $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
+        $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
+        $sessionId = trim($settings['whatsapp_session_id'] ?? '');
+        $headers   = ['Accept' => '*/*'];
+        if ($apiToken !== '') {
+            $headers['Authorization'] = 'Bearer ' . $apiToken;
+            $headers['X-Api-Key']     = $apiToken;
+        }
+
+        // ب) تحميل الملف من الرابط المباشر (ومعالجة حالة إرجاع JSON بداخله base64)
+        if (!$downloaded && $mediaUrl !== '' && filter_var($mediaUrl, FILTER_VALIDATE_URL) && !str_contains($mediaUrl, '.enc')) {
             $resp = Http::withHeaders($headers)->withoutVerifying()->timeout(30)->get($mediaUrl);
             if ($resp->successful() && strlen($resp->body()) > 16) {
-                file_put_contents($tempFile, $resp->body());
-                $downloaded = true;
+                $body = $resp->body();
+                $jsonTry = json_decode($body, true);
+                if (is_array($jsonTry)) {
+                    $b64InJson = data_get($jsonTry, 'base64') ?? data_get($jsonTry, 'data.base64') ?? data_get($jsonTry, 'data') ?? '';
+                    if (is_string($b64InJson) && strlen($b64InJson) > 50) {
+                        $dec = base64_decode(preg_replace('/^data:[^;]+;base64,/', '', $b64InJson), true);
+                        if ($dec !== false) {
+                            file_put_contents($tempFile, $dec);
+                            $downloaded = true;
+                        }
+                    }
+                } else {
+                    file_put_contents($tempFile, $body);
+                    $downloaded = true;
+                }
+            }
+        }
+
+        // ج) إذا كان الرابط مشفراً (.enc) أو فارغاً، نطلب فك تشفير الميديا من سيرفر الواتساب (GreatWhats / Baileys API)
+        if (!$downloaded && $apiUrl !== '' && $messageId !== '') {
+            $baseApi = preg_replace('#/(send|messages|message|chat|api/send).*$#i', '', $apiUrl);
+            $possibleDownloadEndpoints = [
+                $baseApi . '/download-media',
+                $baseApi . '/messages/download',
+                $baseApi . '/media/download',
+                $baseApi . '/get-media',
+            ];
+            $docObj = data_get($payload, 'data.message.documentMessage')
+                   ?? data_get($payload, 'data.message')
+                   ?? data_get($payload, 'data');
+
+            foreach ($possibleDownloadEndpoints as $ep) {
+                try {
+                    $dlResp = Http::withHeaders($headers)->withoutVerifying()->timeout(20)->post($ep, [
+                        'session_id' => $sessionId,
+                        'sessionId'  => $sessionId,
+                        'message_id' => $messageId,
+                        'messageId'  => $messageId,
+                        'id'         => $messageId,
+                        'message'    => $docObj,
+                        'data'       => $docObj,
+                    ]);
+                    if ($dlResp->successful()) {
+                        $dlJson = $dlResp->json();
+                        $b64    = data_get($dlJson, 'base64') ?? data_get($dlJson, 'data.base64') ?? data_get($dlJson, 'media') ?? '';
+                        if (is_string($b64) && strlen($b64) > 60) {
+                            $dec = base64_decode(preg_replace('/^data:[^;]+;base64,/', '', $b64), true);
+                            if ($dec !== false && strlen($dec) > 16) {
+                                file_put_contents($tempFile, $dec);
+                                $downloaded = true;
+                                break;
+                            }
+                        }
+                    }
+                } catch (\Throwable $e) {}
+            }
+        }
+
+        // د) فك تشفير ملف واتساب المباشر (.enc) تلقائياً باستخدام mediaKey إذا كان متوفراً في الـ Payload
+        if (!$downloaded && $mediaUrl !== '' && str_contains($mediaUrl, 'mmg.whatsapp.net')) {
+            $mediaKeyB64 = data_get($payload, 'data.message.documentMessage.mediaKey')
+                        ?? data_get($payload, 'data.documentMessage.mediaKey')
+                        ?? data_get($payload, 'data.mediaKey')
+                        ?? '';
+            if (is_string($mediaKeyB64) && $mediaKeyB64 !== '' && function_exists('hash_hkdf') && function_exists('openssl_decrypt')) {
+                $encResp = Http::withoutVerifying()->timeout(25)->get($mediaUrl);
+                if ($encResp->successful() && strlen($encResp->body()) > 32) {
+                    $mediaKey = base64_decode($mediaKeyB64, true);
+                    if ($mediaKey !== false && strlen($mediaKey) === 32) {
+                        $expanded  = hash_hkdf('sha256', $mediaKey, 112, 'WhatsApp Document Keys', '');
+                        $iv        = substr($expanded, 0, 16);
+                        $cipherKey = substr($expanded, 16, 32);
+                        $encBody   = $encResp->body();
+                        $cipherTxt = substr($encBody, 0, -10); // إزالة 10 بايت MAC
+                        $decrypted = @openssl_decrypt($cipherTxt, 'aes-256-cbc', $cipherKey, OPENSSL_RAW_DATA, $iv);
+                        if ($decrypted !== false && strlen($decrypted) > 16) {
+                            file_put_contents($tempFile, $decrypted);
+                            $downloaded = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -1509,53 +1612,57 @@ function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = 
             return [];
         }
 
-        $colInfo  = detectCustomerInquiryExcelColumns($rows);
-        $partCol  = $colInfo['part_col'];
-        $qtyCol   = $colInfo['qty_col'];
-        $startRow = $colInfo['start_row'];
-
-        $extracted = [];
-        $totalRows = count($rows);
-
-        for ($i = $startRow; $i < $totalRows; $i++) {
-            $row = $rows[$i] ?? null;
-            if (!is_array($row)) continue;
-
-            $rawPart = trim((string) ($row[$partCol] ?? ''));
-            if ($rawPart === '') continue;
-
-            $cleanPart = strtoupper(normalizeArabicDigits($rawPart));
-            $normKey   = normalizePartNumberClean($cleanPart);
-
-            if (strlen($normKey) < 4 || in_array(strtolower($cleanPart), ['item_number', 'part_number', 'code', 'sku', 'رقم الصنف', 'رقم القطعة'], true)) {
-                continue;
-            }
-
-            $reqQty = 1;
-            if ($qtyCol !== null && isset($row[$qtyCol])) {
-                $parsedQty = (int) preg_replace('/[^\d]/', '', normalizeArabicDigits((string) $row[$qtyCol]));
-                if ($parsedQty > 0) {
-                    $reqQty = $parsedQty;
-                }
-            }
-
-            if (!isset($extracted[$normKey])) {
-                $extracted[$normKey] = [
-                    'part_number'   => $cleanPart,
-                    'requested_qty' => $reqQty,
-                ];
-            } else {
-                $extracted[$normKey]['requested_qty'] += $reqQty;
-            }
-        }
-
-        return array_values($extracted);
+        return extractNormalizedInquiryRowsFromSheet($rows);
     } catch (\Throwable $e) {
         if (file_exists($tempFile)) {
             @unlink($tempFile);
         }
         return [];
     }
+}
+
+function extractNormalizedInquiryRowsFromSheet(array $rows): array {
+    $colInfo  = detectCustomerInquiryExcelColumns($rows);
+    $partCol  = $colInfo['part_col'];
+    $qtyCol   = $colInfo['qty_col'];
+    $startRow = $colInfo['start_row'];
+
+    $extracted = [];
+    $totalRows = count($rows);
+
+    for ($i = $startRow; $i < $totalRows; $i++) {
+        $row = $rows[$i] ?? null;
+        if (!is_array($row)) continue;
+
+        $rawPart = trim((string) ($row[$partCol] ?? ''));
+        if ($rawPart === '') continue;
+
+        $cleanPart = strtoupper(normalizeArabicDigits($rawPart));
+        $normKey   = normalizePartNumberClean($cleanPart);
+
+        if (strlen($normKey) < 4 || in_array(strtolower($cleanPart), ['item_number', 'part_number', 'code', 'sku', 'رقم الصنف', 'رقم القطعة'], true)) {
+            continue;
+        }
+
+        $reqQty = 1;
+        if ($qtyCol !== null && isset($row[$qtyCol])) {
+            $parsedQty = (int) preg_replace('/[^\d]/', '', normalizeArabicDigits((string) $row[$qtyCol]));
+            if ($parsedQty > 0) {
+                $reqQty = $parsedQty;
+            }
+        }
+
+        if (!isset($extracted[$normKey])) {
+            $extracted[$normKey] = [
+                'part_number'   => $cleanPart,
+                'requested_qty' => $reqQty,
+            ];
+        } else {
+            $extracted[$normKey]['requested_qty'] += $reqQty;
+        }
+    }
+
+    return array_values($extracted);
 }
 
 /*
@@ -2238,7 +2345,7 @@ function handleWebhook(Request $request) {
         }
     }
 
-    $canShowAvailable   = $whitelistRecord ? (bool) ($whitelistRecord->allow_available ?? true) : true;
+   $canShowAvailable   = $whitelistRecord ? (bool) ($whitelistRecord->allow_available ?? true) : true;
     $canShowUnavailable = $whitelistRecord ? (bool) ($whitelistRecord->allow_unavailable ?? true) : true;
     $canShowPrices      = $whitelistRecord ? (bool) ($whitelistRecord->allow_prices ?? true) : true;
     $canShowQuantities  = $whitelistRecord ? (bool) ($whitelistRecord->allow_quantities ?? true) : true;
@@ -2271,23 +2378,38 @@ function handleWebhook(Request $request) {
                 $isExcelSource ? 'excel' : 'text'
             );
 
-            if ($canShowAvailable) {
-                if ($isExcelSource) {
-                    $rowCells = [$item->item_number, $item->item_name, 'متوفر'];
-                    if ($canShowQuantities) $rowCells[] = $fulfilledQty;
-                    if ($canShowPrices)     $rowCells[] = (float) $item->price;
-                    $excelReplyRows[] = $rowCells;
+            // 1. إذا كان المصدر ملف إكسل: يضاف المتوفر فقط إلى ملف الإكسل (العمود A رقم الصنف، العمود B الكمية، العمود C السعر - وإذا ألغيت الكمية يصبح العمود B السعر)
+            if ($isExcelSource) {
+                $rowCells = [$item->item_number]; // العمود A: رقم الصنف
+                if ($canShowQuantities) {
+                    $rowCells[] = $fulfilledQty;  // العمود B: الكمية
                 }
+                if ($canShowPrices) {
+                    $rowCells[] = (float) $item->price; // العمود C (أو B إذا ألغيت الكمية): السعر
+                }
+                $excelReplyRows[] = $rowCells;
+                continue;
+            }
 
-                if ($msgAvailable !== '') {
-                    $priceDisplay = $canShowPrices ? (string) $item->price : '';
-                    $qtyDisplay   = $canShowQuantities ? (string) $fulfilledQty : '';
-
+            // 2. إذا كان رسالة نصية عادية
+            if ($canShowAvailable) {
+                if ($whitelistRecord) {
+                    // للعميل المستثنى: ترتيب ثابت تحت بعض: رقم الصنف ثم الكمية المتوفرة ثم السعر ريال حسب الصلاحية الممنوحة
+                    $wlLines = [$item->item_number];
+                    if ($canShowQuantities) {
+                        $wlLines[] = (string) $fulfilledQty;
+                    }
+                    if ($canShowPrices) {
+                        $wlLines[] = $item->price . ' ريال';
+                    }
+                    $replyBlocks[] = implode("\n", $wlLines);
+                } elseif ($msgAvailable !== '') {
+                    // للعميل غير المستثنى: يلتزم بقالب رسالة التوفر العام
                     $formattedBlock = formatBotTemplate($msgAvailable, [
                         'item_name'     => $item->item_name,
                         'item_number'   => $item->item_number,
-                        'price'         => $priceDisplay,
-                        'quantity'      => $qtyDisplay,
+                        'price'         => (string) $item->price,
+                        'quantity'      => (string) $fulfilledQty,
                         'requested_qty' => (string) $reqQty,
                         'car'           => $item->detected_car_name ?? '',
                         'category'      => $item->detected_category ?? '',
@@ -2295,9 +2417,7 @@ function handleWebhook(Request $request) {
                         'part'          => $pNum,
                         'client_name'   => $ownerUser->name ?? '',
                         'phone'         => $quotaPhoneKey,
-                        'items'         => "- {$item->item_name} (رقم: {$item->item_number})"
-                            . ($canShowQuantities ? " | المتوفر: {$fulfilledQty}" : "")
-                            . ($canShowPrices ? " | السعر: {$item->price} ريال" : ""),
+                        'items'         => "- {$item->item_name} (رقم: {$item->item_number}) | المتوفر: {$fulfilledQty} | السعر: {$item->price} ريال",
                     ]);
 
                     if ($formattedBlock !== '') {
@@ -2318,24 +2438,16 @@ function handleWebhook(Request $request) {
                 $isExcelSource ? 'excel' : 'text'
             );
 
-            if ($canShowUnavailable) {
-                if ($isExcelSource) {
-                    $rowCells = [$pNum, '—', 'غير متوفر'];
-                    if ($canShowQuantities) $rowCells[] = 0;
-                    if ($canShowPrices)     $rowCells[] = '—';
-                    $excelReplyRows[] = $rowCells;
-                }
-
-                if ($msgUnavailable !== '') {
-                    $singleUnavailBlock = buildSingleUnavailableItemReply(
-                        $msgUnavailable,
-                        $pNum,
-                        (string) ($ownerUser->name ?? ''),
-                        $quotaPhoneKey
-                    );
-                    if ($singleUnavailBlock !== '') {
-                        $replyBlocks[] = $singleUnavailBlock;
-                    }
+            // في ملف الإكسل لا نضع غير المتوفر أبداً (الإكسل للمتوفر فقط)
+            if (!$isExcelSource && $canShowUnavailable && $msgUnavailable !== '') {
+                $singleUnavailBlock = buildSingleUnavailableItemReply(
+                    $msgUnavailable,
+                    $pNum,
+                    (string) ($ownerUser->name ?? ''),
+                    $quotaPhoneKey
+                );
+                if ($singleUnavailBlock !== '') {
+                    $replyBlocks[] = $singleUnavailBlock;
                 }
             }
         }
@@ -2358,11 +2470,22 @@ function handleWebhook(Request $request) {
         ]
     );
 
-    // إذا كان الاستعلام بملف إكسل: ننشئ ملف إكسل (.xlsx) بالنتيجة ونرسله للعميل
-    if ($isExcelSource && !empty($excelReplyRows)) {
-        $excelHeaders = ['رقم الصنف', 'اسم الصنف', 'الحالة'];
-        if ($canShowQuantities) $excelHeaders[] = 'الكمية المتوفرة';
-        if ($canShowPrices)     $excelHeaders[] = 'السعر';
+    // إذا كان الاستعلام بملف إكسل: ننشئ ملف الإكسل للمتوفر فقط ونرسله للعميل مباشرة
+    if ($isExcelSource) {
+        if (empty($excelReplyRows)) {
+            if ($canShowUnavailable && $msgUnavailable !== '') {
+                sendWhatsappReplyMessage($settings, $cleanPhone, $rawSender, $convId, $msgUnavailable);
+            }
+            return response()->json(['status' => 'excel_processed_no_available_items'], 200);
+        }
+
+        $excelHeaders = ['رقم الصنف']; // العمود A
+        if ($canShowQuantities) {
+            $excelHeaders[] = 'الكمية'; // العمود B
+        }
+        if ($canShowPrices) {
+            $excelHeaders[] = 'السعر';  // العمود C (أو B إذا ألغيت الكمية)
+        }
 
         $outDir = storage_path('app/public/whatsapp_exports');
         if (!is_dir($outDir)) {
@@ -2372,9 +2495,17 @@ function handleWebhook(Request $request) {
         $outFullPath = $outDir . DIRECTORY_SEPARATOR . $outFileName;
 
         if (generateExcelReplyFileXlsx($excelHeaders, $excelReplyRows, $outFullPath)) {
-            $caption = "📊 *تم فحص وتسعير ملف الإكسل ({$countedQueries} صنف)*";
-            sendWhatsappExcelDocument($settings, $cleanPhone, $rawSender, $convId, $outFullPath, 'نتيجة_التسعير.xlsx', $caption);
+            $availCount = count($excelReplyRows);
+            $caption    = "✅ تم تسعير الأصناف المتوفرة ({$availCount} صنف)";
+            sendWhatsappExcelDocument($settings, $cleanPhone, $rawSender, $convId, $outFullPath, 'تسعير_الاصناف_المتوفرة.xlsx', $caption);
         }
+
+        return response()->json([
+            'status'          => 'excel_reply_sent',
+            'session_id'      => $sessionId,
+            'counted_queries' => $countedQueries,
+            'available_rows'  => count($excelReplyRows),
+        ], 200);
     }
 
     $finalDirectReply = implode("\n\n", array_values(array_filter($replyBlocks)));
@@ -2612,6 +2743,30 @@ HTML;
 
 function injectInventoryLiveSearchAndFiltersScript(string $html): string {
     $currentFilter = request()->query('stock_filter', 'all');
+    $rollbackUrl   = route('inventory.import.rollback');
+    $csrfToken     = csrf_token();
+
+    // التحقق هل تم رفع ملف إكسل جديد خلال آخر 20 ثانية فقط
+    $recentJob = DB::table('excel_import_jobs')
+        ->where('user_id', auth()->id())
+        ->whereNotIn('status', ['rolled_back'])
+        ->orderByDesc('id')
+        ->first();
+
+    $remainingRollbackSeconds = 0;
+    $snapshotIdForRollback    = '';
+    if ($recentJob && !empty($recentJob->snapshot_id) && !empty($recentJob->created_at)) {
+        $elapsed = Carbon::parse($recentJob->created_at)->diffInSeconds(now());
+        if ($elapsed < 20) {
+            $remainingRollbackSeconds = 20 - $elapsed;
+            $snapshotIdForRollback    = (string) $recentJob->snapshot_id;
+        }
+    }
+
+    if (session()->has('just_imported_excel_snapshot_id')) {
+        $remainingRollbackSeconds = 20;
+        $snapshotIdForRollback    = (string) session('just_imported_excel_snapshot_id');
+    }
 
     $injectedAssets = <<<HTML
 <style>
@@ -2653,9 +2808,103 @@ function injectInventoryLiveSearchAndFiltersScript(string $html): string {
         margin-right: 8px;
         display: none;
     }
+    #epc-temp-rollback-banner {
+        display: none;
+        background: #fffbeb;
+        border: 2px solid #f59e0b;
+        border-radius: 12px;
+        padding: 12px 18px;
+        margin: 12px 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        direction: rtl;
+        box-shadow: 0 4px 12px rgba(245, 158, 11, 0.15);
+    }
 </style>
+
+<div id="epc-temp-rollback-banner">
+    <div style="font-size:13px;font-weight:800;color:#92400e;display:flex;align-items:center;gap:8px;">
+        <span>⚠️ تم رفع ملف إكسل جديد — يمكنك التراجع واستعادة مخزونك السابق خلال:</span>
+        <span id="epc-rollback-timer-badge" style="background:#dc2626;color:#fff;padding:3px 10px;border-radius:999px;font-size:13px;font-weight:800;">20 ثانية</span>
+    </div>
+    <form method="POST" action="{$rollbackUrl}" style="margin:0;">
+        <input type="hidden" name="_token" value="{$csrfToken}">
+        <input type="hidden" name="snapshot_id" id="epc-rollback-snap-id" value="{$snapshotIdForRollback}">
+        <button type="submit" style="background:#dc2626;color:#ffffff;border:none;padding:8px 18px;border-radius:8px;font-weight:800;font-size:13px;cursor:pointer;">
+            ⏪ التراجع عن استيراد الإكسل الآن
+        </button>
+    </form>
+</div>
+
 <script>
 document.addEventListener('DOMContentLoaded', function () {
+    // 1. إخفاء أي زر تراجع قديم ثابت في الصفحة حتى لا يظهر إلا المؤقت لمدة 20 ثانية
+    document.querySelectorAll('form[action*="rollback"]').forEach(function (f) {
+        if (!f.closest('#epc-temp-rollback-banner')) {
+            f.style.display = 'none';
+        }
+    });
+    document.querySelectorAll('button, a').forEach(function (el) {
+        const txt = (el.textContent || '').trim();
+        if ((txt.includes('تراجع عن آخر استيراد') || txt.includes('استعادة المخزون السابق')) && !el.closest('#epc-temp-rollback-banner')) {
+            el.style.display = 'none';
+        }
+    });
+
+    const rollbackBanner = document.getElementById('epc-temp-rollback-banner');
+    const timerBadge     = document.getElementById('epc-rollback-timer-badge');
+    const snapInput      = document.getElementById('epc-rollback-snap-id');
+    let countdownInterval = null;
+
+    function startRollbackCountdown(seconds, snapshotId) {
+        if (!rollbackBanner || seconds <= 0) return;
+        if (snapshotId && snapInput) snapInput.value = snapshotId;
+
+        const mainArea = document.querySelector('main') || document.querySelector('table')?.parentElement;
+        if (mainArea && rollbackBanner.parentElement !== mainArea) {
+            mainArea.insertBefore(rollbackBanner, mainArea.firstChild);
+        }
+
+        let left = Math.min(20, Math.ceil(seconds));
+        rollbackBanner.style.display = 'flex';
+        if (timerBadge) timerBadge.textContent = left + ' ثانية';
+
+        if (countdownInterval) clearInterval(countdownInterval);
+        countdownInterval = setInterval(function () {
+            left--;
+            if (left <= 0) {
+                clearInterval(countdownInterval);
+                rollbackBanner.style.display = 'none';
+            } else if (timerBadge) {
+                timerBadge.textContent = left + ' ثانية';
+            }
+        }, 1000);
+    }
+
+    // إذا تم رفع ملف للتو قبل تحديث الصفحة، يبدأ عداد الـ 20 ثانية فوراً
+    const initialSeconds = {$remainingRollbackSeconds};
+    if (initialSeconds > 0) {
+        startRollbackCountdown(initialSeconds, '{$snapshotIdForRollback}');
+    }
+
+    // مراقبة أي عملية رفع ملف إكسل عبر Fetch/AJAX لإظهار الزر لمدة 20 ثانية فور انتهاء الرفع ثم إخفائه
+    const origFetch = window.fetch;
+    window.fetch = function () {
+        const reqUrl = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0]?.url || '');
+        return origFetch.apply(this, arguments).then(function (response) {
+            if (reqUrl.includes('/inventory/import') && !reqUrl.includes('/rollback') && !reqUrl.includes('/detect-columns')) {
+                response.clone().json().then(function (data) {
+                    if (data && (data.status === 'success' || data.status === 'background_started' || (data.job && data.job.status === 'completed'))) {
+                        const sid = data.snapshot_id || (data.latest_snapshot ? data.latest_snapshot.id : '');
+                        startRollbackCountdown(20, sid);
+                    }
+                }).catch(function () {});
+            }
+            return response;
+        });
+    };
+
     const searchInput = document.querySelector('input[name="search"], input[type="search"], #search-input, #inventory-search');
     if (!searchInput) return;
 
@@ -2704,7 +2953,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (loadingBadge) loadingBadge.style.display = 'inline-block';
 
-        fetch(url.toString(), {
+        origFetch(url.toString(), {
             headers: {
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json, text/html'
@@ -3354,7 +3603,7 @@ Route::middleware('auth')->group(function () {
         return back()->with('success', 'تم حذف الكلمة المفتاحية.');
     })->name('master.item.keyword.delete');
 
-    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) مع زر تشغيل/إيقاف البوت
+    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) - بدون تسجيل التجارب في الأصناف المطلوبة نهائياً
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId          = auth()->id();
         $customerMessage = (string) $request->query('message', '');
@@ -3376,17 +3625,6 @@ Route::middleware('auth')->group(function () {
                         }
                     })
                     ->get();
-
-                foreach ($extractedWithQty as $reqItem) {
-                    $pNum = $reqItem['part_number'];
-                    $rQty = max(1, (int) ($reqItem['requested_qty'] ?? 1));
-                    $found = findExactItemIgnoringDashes($userId, $pNum, true);
-                    if ($found) {
-                        recordRadarInquiryLog($userId, 'محاكي الصفحة', $found->item_number, $found->item_name, 'available', $rQty, (int) $found->quantity, (float) $found->price, 'text');
-                    } else {
-                        recordRadarInquiryLog($userId, 'محاكي الصفحة', $pNum, null, 'unavailable', $rQty, 0, null, 'text');
-                    }
-                }
             }
         }
 
