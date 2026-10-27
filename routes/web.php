@@ -1654,7 +1654,7 @@ function extractNormalizedInquiryRowsFromSheet(array $rows): array {
 function getUserBotSettings(int $userId): array {
     $defaults = [
         'bot_enabled'           => "1",
-        'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالكمية المتوفرة: {quantity}\nالسعر: {price} ريال",
+        'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالكمية المتوفرة: الكمية : {quantity} حبة\nالسعر: السعر : {price} ريال",
         'reply_unavailable'     => "غير متوفر ❌",
         'reply_quota_exceeded'  => "نعتذر منك، لقد استنفدت الحد المسموح به للاستعلام الآلي.",
         'max_queries_per_phone' => "0",
@@ -2664,9 +2664,9 @@ function enhanceSecondPageWithBotToggle(string $html, array $botSettings): strin
     $statusBg    = $isEnabled ? '#f0fdf4' : '#fef2f2';
     $statusBdr   = $isEnabled ? '#86efac' : '#fca5a5';
     $badgeBg     = $isEnabled ? '#16a34a' : '#dc2626';
-    $statusText  = $isEnabled ? '🟢 البوت مفعل حالياً (يرد على العملاء آلياً ويسجل في الرادار)' : '🔴 البوت متوقف عن الرد حالياً (يستلم البيانات بصمت ويضيفها لصفحة الأصناف المطلوبة فقط)';
+    $statusText  = $isEnabled ? '🟢 البوت مفعل ' : '🔴 البوت متوقف عن الرد ';
     $btnBg       = $isEnabled ? '#dc2626' : '#16a34a';
-    $btnLabel    = $isEnabled ? '⏸️ إيقاف الرد الآلي للبوت' : '▶️ تفعيل الرد الآلي للبوت';
+    $btnLabel    = $isEnabled ? '⏸️ إيقاف تفعيل البوت' : '▶️ تفعيل البوت';
     $nextVal     = $isEnabled ? '0' : '1';
 
     $bannerHtml = <<<HTML
@@ -2676,9 +2676,6 @@ function enhanceSecondPageWithBotToggle(string $html, array $botSettings): strin
                 <span style="background:{$badgeBg};color:#fff;padding:4px 12px;border-radius:999px;font-size:12px;">حالة البوت</span>
                 <span>{$statusText}</span>
             </div>
-            <p style="margin:6px 0 0 0;font-size:13px;color:#475569;">
-                عند إيقاف البوت لن يرسل أي رسائل للعملاء إطلاقاً، ولكنه سيستمر في استلام الرسائل وملفات الإكسل وحفظها في صفحة "الأصناف المطلوبة".
-            </p>
         </div>
         <form method="POST" action="{$toggleUrl}" style="margin:0;">
             <input type="hidden" name="_token" value="{$csrfToken}">
@@ -2867,14 +2864,14 @@ function injectInventoryLiveSearchAndFiltersScript(string $html): string {
 
 <div id="epc-temp-rollback-banner">
     <div style="font-size:13px;font-weight:800;color:#92400e;display:flex;align-items:center;gap:8px;">
-        <span>⚠️ تم رفع ملف إكسل جديد — يمكنك التراجع واستعادة مخزونك السابق خلال:</span>
+        <span> يتم رفع ملف اكسل جديد - يمكنك التراجع واستعادة مخزونك السابق خلال:</span>
         <span id="epc-rollback-timer-badge" style="background:#dc2626;color:#fff;padding:3px 10px;border-radius:999px;font-size:13px;font-weight:800;">20 ثانية</span>
     </div>
     <form method="POST" action="{$rollbackUrl}" style="margin:0;">
         <input type="hidden" name="_token" value="{$csrfToken}">
         <input type="hidden" name="snapshot_id" id="epc-rollback-snap-id" value="{$snapshotIdForRollback}">
         <button type="submit" style="background:#dc2626;color:#ffffff;border:none;padding:8px 18px;border-radius:8px;font-weight:800;font-size:13px;cursor:pointer;">
-            ⏪ التراجع عن استيراد الإكسل الآن
+            اضغط للتراجع
         </button>
     </form>
 </div>
@@ -3693,8 +3690,8 @@ Route::middleware('auth')->group(function () {
         );
 
         $msg = $newState === '1'
-            ? 'تم تفعيل الرد الآلي للبوت بنجاح.'
-            : 'تم إيقاف الرد الآلي للبوت (سيستمر النظام في استلام البيانات وتسجيلها في صفحة الأصناف المطلوبة دون الرد على العملاء).';
+            ? 'تم تفعيل الرد الآلي للبوت .'
+            : 'تم إيقاف الرد الآلي للبوت ';
 
         return back()->with('success', $msg);
     })->name('pages.second.toggle_bot');
@@ -4815,31 +4812,180 @@ HTML;
         return back()->with('success', 'تم تصفير عداد الاستعلامات لجميع الأرقام بنجاح.');
     })->name('pages.second.quotas.reset');
 
-    // 8. إعدادات الربط API والنسخ الاحتياطي
+  // 8. إعدادات الربط API والنسخ الاحتياطي (مع دعم الرفع المجزأ لتجاوز حد حجم الملف في السيرفر)
     Route::get('/page-third', function () {
         if (auth()->user()->role !== 'admin') abort(403);
         $webhookLogs = DB::table('webhook_logs')->latest()->take(20)->get();
-        $rendered = view('pages.third', compact('webhookLogs'))->render();
-        return response(injectSidebarNavigationLinks($rendered));
+        $rendered    = view('pages.third', compact('webhookLogs'))->render();
+        $restoreUrl  = route('backup.restore');
+        $csrfToken   = csrf_token();
+
+        $chunkScript = <<<HTML
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const restoreForm = document.querySelector('form[action*="restore-backup"]');
+    if (!restoreForm) return;
+
+    restoreForm.addEventListener('submit', async function (e) {
+        const fileInput = restoreForm.querySelector('input[type="file"]');
+        if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+
+        e.preventDefault();
+        const file = fileInput.files[0];
+        const submitBtn = restoreForm.querySelector('button[type="submit"]');
+        const origText = submitBtn ? submitBtn.innerHTML : 'استعادة';
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.style.opacity = '0.7';
+        }
+
+        // تقسيم الملف إلى أجزاء بحجم 1 ميجابايت لتجاوز حد upload_max_filesize (2MB) في PHP
+        const chunkSize = 1024 * 1024;
+        const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+        const uploadId = 'bk_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+
+        try {
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * chunkSize;
+                const end = Math.min(file.size, start + chunkSize);
+                const blobSlice = file.slice(start, end);
+
+                const percent = Math.round(((i + 1) / totalChunks) * 100);
+                if (submitBtn) {
+                    submitBtn.innerHTML = '⏳ جاري رفع واستعادة النسخة... (' + percent + '%)';
+                }
+
+                const base64Chunk = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const res = String(reader.result || '');
+                        resolve(res.includes(',') ? res.split(',')[1] : res);
+                    };
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blobSlice);
+                });
+
+                const res = await fetch('{$restoreUrl}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': '{$csrfToken}'
+                    },
+                    body: JSON.stringify({
+                        chunk_upload: true,
+                        upload_id: uploadId,
+                        chunk_index: i,
+                        total_chunks: totalChunks,
+                        chunk_data: base64Chunk
+                    })
+                });
+
+                const data = await res.json();
+                if (!res.ok || data.status === 'error') {
+                    throw new Error(data.message || 'فشل رفع جزء من النسخة الاحتياطية.');
+                }
+            }
+
+            if (submitBtn) {
+                submitBtn.innerHTML = '✅ تمت الاستعادة بنجاح! جاري تحديث الصفحة...';
+            }
+            window.location.reload();
+        } catch (err) {
+            alert('❌ حدث خطأ أثناء استعادة النسخة الاحتياطية: ' + err.message);
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.style.opacity = '1';
+                submitBtn.innerHTML = origText;
+            }
+        }
+    });
+});
+</script>
+HTML;
+
+        $rendered = injectSidebarNavigationLinks($rendered);
+        if (str_contains($rendered, '</body>')) {
+            $rendered = str_replace('</body>', $chunkScript . "\n</body>", $rendered);
+        } else {
+            $rendered .= $chunkScript;
+        }
+
+        return response($rendered);
     })->name('pages.third');
 
     Route::get('/download-backup', function () {
         if (auth()->user()->role !== 'admin') abort(403);
         $path = config('database.connections.sqlite.database', database_path('database.sqlite'));
+        try {
+            DB::statement('PRAGMA wal_checkpoint(FULL);');
+        } catch (\Throwable $e) {}
         return response()->download($path, 'database_backup_' . date('Y-m-d_H-i-s') . '.sqlite');
     })->name('backup.download');
 
     Route::post('/restore-backup', function (Request $request) {
         if (auth()->user()->role !== 'admin') abort(403);
 
-        $request->validate([
-            'backup_file' => 'required|file',
-        ]);
-
-        $file       = $request->file('backup_file');
         $targetPath = config('database.connections.sqlite.database', database_path('database.sqlite'));
 
+        // 1. استقبال الأجزاء المرفوعة (Chunked Base64 Upload) لتجاوز قيود حجم الملف في PHP
+        if ($request->boolean('chunk_upload')) {
+            $uploadId    = preg_replace('/[^a-zA-Z0-9_\-]/', '', (string) $request->input('upload_id', 'temp'));
+            $chunkIndex  = (int) $request->input('chunk_index', 0);
+            $totalChunks = (int) $request->input('total_chunks', 1);
+            $chunkData   = (string) $request->input('chunk_data', '');
+
+            $tempDir = storage_path('app/temp_backups');
+            if (!is_dir($tempDir)) {
+                @mkdir($tempDir, 0775, true);
+            }
+
+            $tempFile = $tempDir . DIRECTORY_SEPARATOR . $uploadId . '.sqlite.part';
+            if ($chunkIndex === 0 && file_exists($tempFile)) {
+                @unlink($tempFile);
+            }
+
+            $decoded = base64_decode($chunkData, true);
+            if ($decoded === false) {
+                return response()->json(['status' => 'error', 'message' => 'تعذر قراءة بيانات الجزء المرفوع.'], 422);
+            }
+
+            file_put_contents($tempFile, $decoded, FILE_APPEND);
+
+            if ($chunkIndex + 1 >= $totalChunks) {
+                $header = file_get_contents($tempFile, false, null, 0, 16);
+                if ($header === false || !str_starts_with($header, 'SQLite format 3')) {
+                    @unlink($tempFile);
+                    return response()->json(['status' => 'error', 'message' => 'الملف المرفوع ليس قاعدة بيانات SQLite صالحة.'], 422);
+                }
+
+                DB::disconnect('sqlite');
+                if (file_exists($targetPath . '-wal')) @unlink($targetPath . '-wal');
+                if (file_exists($targetPath . '-shm')) @unlink($targetPath . '-shm');
+
+                copy($tempFile, $targetPath);
+                @unlink($tempFile);
+
+                session()->flash('success', 'تمت استعادة النسخة الاحتياطية لقاعدة البيانات بنجاح!');
+                return response()->json(['status' => 'completed', 'message' => 'تمت الاستعادة بنجاح!']);
+            }
+
+            return response()->json(['status' => 'chunk_received', 'chunk' => $chunkIndex]);
+        }
+
+        // 2. الاحتياطي المباشر للملفات الصغيرة جداً
+        if (!$request->hasFile('backup_file') || !$request->file('backup_file')->isValid()) {
+            $errMsg = $request->hasFile('backup_file')
+                ? $request->file('backup_file')->getErrorMessage()
+                : 'حجم الملف أكبر من الحد المسموح به في السيرفر.';
+            return back()->with('error', 'تعذر رفع ملف النسخة الاحتياطية: ' . $errMsg);
+        }
+
+        $file = $request->file('backup_file');
         DB::disconnect('sqlite');
+        if (file_exists($targetPath . '-wal')) @unlink($targetPath . '-wal');
+        if (file_exists($targetPath . '-shm')) @unlink($targetPath . '-shm');
+
         copy($file->getRealPath(), $targetPath);
 
         return back()->with('success', 'تمت استعادة النسخة الاحتياطية لقاعدة البيانات بنجاح!');
