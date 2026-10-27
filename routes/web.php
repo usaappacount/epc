@@ -2009,7 +2009,165 @@ function getPhoneMatchVariants(string $normalizedPhone): array {
     }
     return array_values(array_unique(array_filter($variants)));
 }
+/**
+ * 1. دالة إرسال كود التحقق (OTP) عبر الواتساب عند تسجيل الدخول
+ */
+if (!function_exists('sendWhatsappLoginOtp')) {
+    function sendWhatsappLoginOtp($user, string $otpCode): bool {
+        try {
+            $cleanPhone = normalizeWhatsappDigits((string) ($user->phone ?? ''));
+            if ($cleanPhone === '') {
+                return false;
+            }
 
+            // جلب إعدادات الواتساب من حساب المستخدم أو حساب المدير العام
+            $settings = getUserBotSettings((int) $user->id);
+            if (empty(trim($settings['whatsapp_api_url'] ?? ''))) {
+                $admin = User::where('role', 'admin')->first();
+                if ($admin) {
+                    $settings = getUserBotSettings((int) $admin->id);
+                }
+            }
+
+            // إذا لم يكن في حساب المدير، نبحث عن أي إعدادات مربوطة في النظام
+            if (empty(trim($settings['whatsapp_api_url'] ?? ''))) {
+                $firstConfigured = DB::table('user_bot_settings')
+                    ->where('key', 'whatsapp_api_url')
+                    ->whereNotNull('value')
+                    ->where('value', '!=', '')
+                    ->first();
+                if ($firstConfigured) {
+                    $settings = getUserBotSettings((int) $firstConfigured->user_id);
+                }
+            }
+
+            $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
+            $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
+            $sessionId = trim($settings['whatsapp_session_id'] ?? '');
+
+            if ($apiUrl === '') {
+                return false;
+            }
+
+            $headers = ['Accept' => 'application/json'];
+            if ($apiToken !== '') {
+                $headers['Authorization'] = 'Bearer ' . $apiToken;
+                $headers['X-Api-Key']     = $apiToken;
+                $headers['X-API-Key']     = $apiToken;
+            }
+
+            $messageText = "🔐 كود التحقق لتسجيل الدخول هو: *{$otpCode}*";
+
+            $response = Http::withHeaders($headers)
+                ->withoutVerifying()
+                ->timeout(15)
+                ->post($apiUrl, [
+                    'session_id'  => $sessionId,
+                    'sessionId'   => $sessionId,
+                    'session'     => $sessionId,
+                    'instance_id' => $sessionId,
+                    'token'       => $apiToken,
+                    'api_key'     => $apiToken,
+                    'to'          => $cleanPhone,
+                    'phone'       => $cleanPhone,
+                    'recipient'   => $cleanPhone,
+                    'number'      => $cleanPhone,
+                    'chatId'      => $cleanPhone . '@c.us',
+                    'body'        => $messageText,
+                    'message'     => $messageText,
+                    'text'        => $messageText,
+                    'content'     => $messageText,
+                ]);
+
+            return $response->successful();
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+}
+
+/**
+ * 2. دالة فحص ما إذا كانت الرسالة واردة من قروب أو حالة (Broadcast/Status)
+ */
+if (!function_exists('detectGroupAndBroadcastStatus')) {
+    function detectGroupAndBroadcastStatus(array $payload): array {
+        $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
+
+        $isBroadcast = str_contains($rawJson, 'status@broadcast')
+                    || str_contains($rawJson, '@broadcast')
+                    || str_contains($rawJson, '@newsletter')
+                    || (bool) data_get($payload, 'data.isBroadcast', false)
+                    || (bool) data_get($payload, 'isBroadcast', false);
+
+        $groupJid = '';
+        $candidates = [
+            data_get($payload, 'data.key.remoteJid'),
+            data_get($payload, 'data.remoteJid'),
+            data_get($payload, 'data.from'),
+            data_get($payload, 'from'),
+            data_get($payload, 'chatId'),
+            data_get($payload, 'data.chatId'),
+            data_get($payload, 'data.group_id'),
+            data_get($payload, 'group_id'),
+        ];
+
+        foreach ($candidates as $cand) {
+            if (is_string($cand) && str_contains($cand, '@g.us')) {
+                $groupJid = trim($cand);
+                break;
+            }
+        }
+
+        $isGroup = ($groupJid !== '')
+                || str_contains($rawJson, '@g.us')
+                || (bool) data_get($payload, 'data.isGroup', false)
+                || (bool) data_get($payload, 'isGroup', false)
+                || (bool) data_get($payload, 'data.is_group', false)
+                || (bool) data_get($payload, 'is_group', false);
+
+        return [
+            'is_group'     => $isGroup,
+            'is_broadcast' => $isBroadcast,
+            'group_jid'    => $groupJid,
+        ];
+    }
+}
+
+/**
+ * 3. دالة التحقق من الأوقات المسموحة للرقم المستثنى (Whitelist Time Window)
+ */
+if (!function_exists('isWithinAllowedTimeWindow')) {
+    function isWithinAllowedTimeWindow(?string $startTime, ?string $endTime): bool {
+        $start = trim((string) $startTime);
+        $end   = trim((string) $endTime);
+
+        if ($start === '' || $end === '') {
+            return true;
+        }
+
+        try {
+            $nowMinutes = Carbon::now('Asia/Riyadh')->hour * 60 + Carbon::now('Asia/Riyadh')->minute;
+
+            $sParts = explode(':', $start);
+            $eParts = explode(':', $end);
+            if (count($sParts) < 2 || count($eParts) < 2) {
+                return true;
+            }
+
+            $startMinutes = ((int) $sParts[0]) * 60 + ((int) $sParts[1]);
+            $endMinutes   = ((int) $eParts[0]) * 60 + ((int) $eParts[1]);
+
+            if ($startMinutes <= $endMinutes) {
+                return $nowMinutes >= $startMinutes && $nowMinutes <= $endMinutes;
+            } else {
+                // في حال كانت الفترة تعبر منتصف الليل (مثلاً من 22:00 إلى 04:00)
+                return $nowMinutes >= $startMinutes || $nowMinutes <= $endMinutes;
+            }
+        } catch (\Throwable $e) {
+            return true;
+        }
+    }
+}
 function handleWebhook(Request $request) {
     @ignore_user_abort(true);
     @set_time_limit(0);
