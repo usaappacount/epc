@@ -55,7 +55,7 @@ try {
         }
     }
 
-    // جدول الاستثناءات المتقدم (حدود مخصصة + أوقات مسموحة + صلاحيات عرض دقيقة + إكسل)
+    // جدول الاستثناءات المتقدم (حدود مخصصة + دورة تصفير + أوقات مسموحة + صلاحيات عرض دقيقة + إكسل)
     if (!Schema::hasTable('whatsapp_whitelist_phones')) {
         Schema::create('whatsapp_whitelist_phones', function (Blueprint $table) {
             $table->id();
@@ -63,6 +63,7 @@ try {
             $table->string('phone')->index();
             $table->string('label')->nullable();
             $table->integer('custom_quota')->nullable();
+            $table->string('reset_period', 20)->default('default'); // default | manual | daily | weekly | monthly
             $table->string('allowed_start_time', 10)->nullable();
             $table->string('allowed_end_time', 10)->nullable();
             $table->boolean('allow_available')->default(true);
@@ -76,6 +77,7 @@ try {
     } else {
         $whitelistCols = [
             'custom_quota'       => fn(Blueprint $t) => $t->integer('custom_quota')->nullable(),
+            'reset_period'       => fn(Blueprint $t) => $t->string('reset_period', 20)->default('default'),
             'allowed_start_time' => fn(Blueprint $t) => $t->string('allowed_start_time', 10)->nullable(),
             'allowed_end_time'   => fn(Blueprint $t) => $t->string('allowed_end_time', 10)->nullable(),
             'allow_available'    => fn(Blueprint $t) => $t->boolean('allow_available')->default(true),
@@ -103,7 +105,7 @@ try {
         });
     }
 
-    // جدول سجل ورادار الطلبات الشامل (يسجل المتوفر وغير المتوفر بالتواريخ والكميات والأسعار من جميع العملاء)
+    // جدول سجل ورادار الطلبات الشامل
     if (!Schema::hasTable('whatsapp_inquiry_logs')) {
         Schema::create('whatsapp_inquiry_logs', function (Blueprint $table) {
             $table->id();
@@ -112,12 +114,12 @@ try {
             $table->string('part_number')->index();
             $table->string('normalized_part')->index();
             $table->string('item_name')->nullable();
-            $table->string('status', 20)->default('unavailable')->index(); // available | unavailable
+            $table->string('status', 20)->default('unavailable')->index();
             $table->integer('requested_qty')->default(1);
             $table->integer('available_qty')->default(0);
             $table->decimal('price', 12, 2)->nullable();
-            $table->string('source', 20)->default('text'); // text | excel
-            $table->string('inquiry_date', 15)->nullable()->index(); // YYYY-MM-DD لحساب عدم التكرار في نفس اليوم
+            $table->string('source', 20)->default('text');
+            $table->string('inquiry_date', 15)->nullable()->index();
             $table->timestamps();
         });
     } else {
@@ -126,6 +128,16 @@ try {
                 $table->string('inquiry_date', 15)->nullable()->index();
             });
         }
+    }
+
+    // جدول الكلمات المفتاحية للأصناف الموحدة (لمنع خطأ Route [master.item.keyword.add] not defined)
+    if (!Schema::hasTable('master_item_keywords')) {
+        Schema::create('master_item_keywords', function (Blueprint $table) {
+            $table->id();
+            $table->string('item_number')->index();
+            $table->string('keyword');
+            $table->timestamps();
+        });
     }
 
     // ترقية جدول قلب النظام (master_items)
@@ -184,7 +196,7 @@ try {
 
 /*
 |--------------------------------------------------------------------------
-| 2. دوال المساعدة وتنسيق النصوص والأرقام (Helper & Normalization Functions)
+| 2. دوال المساعدة وتنسيق النصوص والأرقام + قراءة وكتابة XLSX الأصلي
 |--------------------------------------------------------------------------
 */
 
@@ -255,6 +267,198 @@ function containsWholeWordArabicSafe(string $subject, string $search): bool {
     $normSearch  = normalizeArabicSpelling($search);
     $normPattern = '/(?<=^|[\s,،\-\+\/\(\)\*\.])' . preg_quote($normSearch, '/') . '(?=$|[\s,،\-\+\/\(\)\*\.])/iu';
     return (bool) preg_match($normPattern, $normSubject);
+}
+
+/**
+ * قارئ ملفات .xlsx مدمج وخفيف يعتمد على ZipArchive + SimpleXML في حال عدم وجود مكتبة PhpSpreadsheet
+ */
+function parseXlsxFileNativeFallback(string $filePath): array {
+    if (!class_exists(\ZipArchive::class) || !file_exists($filePath)) {
+        return [];
+    }
+
+    $zip = new \ZipArchive();
+    if ($zip->open($filePath) !== true) {
+        return [];
+    }
+
+    $sharedStrings = [];
+    $sharedXml = $zip->getFromName('xl/sharedStrings.xml');
+    if ($sharedXml !== false) {
+        $sx = @simplexml_load_string($sharedXml);
+        if ($sx && isset($sx->si)) {
+            foreach ($sx->si as $si) {
+                if (isset($si->t)) {
+                    $sharedStrings[] = (string) $si->t;
+                } elseif (isset($si->r)) {
+                    $txt = '';
+                    foreach ($si->r as $run) {
+                        $txt .= (string) ($run->t ?? '');
+                    }
+                    $sharedStrings[] = $txt;
+                } else {
+                    $sharedStrings[] = '';
+                }
+            }
+        }
+    }
+
+    $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml');
+    if ($sheetXml === false) {
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = $zip->getNameIndex($i);
+            if (preg_match('#^xl/worksheets/sheet\d+\.xml$#i', (string) $name)) {
+                $sheetXml = $zip->getFromIndex($i);
+                break;
+            }
+        }
+    }
+    $zip->close();
+
+    if ($sheetXml === false) {
+        return [];
+    }
+
+    $xml = @simplexml_load_string($sheetXml);
+    if (!$xml || !isset($xml->sheetData->row)) {
+        return [];
+    }
+
+    $rows = [];
+    foreach ($xml->sheetData->row as $row) {
+        $rowData = [];
+        $maxCol  = 0;
+        foreach ($row->c as $c) {
+            $ref = (string) ($c['r'] ?? '');
+            $colIndex = 0;
+            if (preg_match('/^([A-Z]+)/i', $ref, $m)) {
+                $letters = strtoupper($m[1]);
+                for ($l = 0; $l < strlen($letters); $l++) {
+                    $colIndex = $colIndex * 26 + (ord($letters[$l]) - 64);
+                }
+                $colIndex--;
+            } else {
+                $colIndex = count($rowData);
+            }
+
+            $type = (string) ($c['t'] ?? '');
+            $val  = '';
+            if ($type === 's') {
+                $idx = (int) ($c->v ?? 0);
+                $val = $sharedStrings[$idx] ?? '';
+            } elseif ($type === 'inlineStr') {
+                $val = (string) ($c->is->t ?? '');
+            } else {
+                $val = (string) ($c->v ?? '');
+            }
+
+            $rowData[$colIndex] = trim($val);
+            if ($colIndex > $maxCol) {
+                $maxCol = $colIndex;
+            }
+        }
+
+        if (!empty($rowData)) {
+            $normalizedRow = [];
+            for ($k = 0; $k <= $maxCol; $k++) {
+                $normalizedRow[$k] = $rowData[$k] ?? '';
+            }
+            $rows[] = $normalizedRow;
+        }
+    }
+
+    return $rows;
+}
+
+/**
+ * منشئ ملفات .xlsx مدمج وخفيف لتوليد ملف رد إكسل حقيقي للعميل على الواتساب
+ */
+function generateExcelReplyFileXlsx(array $headers, array $dataRows, string $outputPath): bool {
+    $allRows = array_merge([$headers], $dataRows);
+
+    if (class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class) && class_exists(\PhpOffice\PhpSpreadsheet\Writer\Xlsx::class)) {
+        try {
+            $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
+            $sheet->setRightToLeft(true);
+            $sheet->setTitle('نتيجة التسعير');
+            $sheet->fromArray($allRows, null, 'A1');
+            $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+            $writer->save($outputPath);
+            return file_exists($outputPath);
+        } catch (\Throwable $e) {
+            // ننتقل للمنشئ المدمج
+        }
+    }
+
+    if (!class_exists(\ZipArchive::class)) {
+        return false;
+    }
+
+    $zip = new \ZipArchive();
+    if ($zip->open($outputPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+        return false;
+    }
+
+    $contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        . '<Default Extension="xml" ContentType="application/xml"/>'
+        . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        . '</Types>';
+
+    $rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        . '</Relationships>';
+
+    $workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        . '<sheets><sheet name="نتيجة التسعير" sheetId="1" r:id="rId1"/></sheets>'
+        . '</workbook>';
+
+    $workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        . '</Relationships>';
+
+    $sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        . '<sheetViews><sheetView rightToLeft="1" workbookViewId="0"/></sheetViews>'
+        . '<sheetData>';
+
+    $rNum = 1;
+    foreach ($allRows as $row) {
+        $sheetXml .= '<row r="' . $rNum . '">';
+        $cNum = 0;
+        foreach (array_values($row) as $cellVal) {
+            $colLetter = chr(65 + $cNum);
+            $cellRef   = $colLetter . $rNum;
+            $valStr    = (string) ($cellVal ?? '');
+
+            if ($rNum > 1 && is_numeric($valStr) && !preg_match('/^0\d+/', $valStr) && strlen($valStr) < 10) {
+                $sheetXml .= '<c r="' . $cellRef . '"><v>' . $valStr . '</v></c>';
+            } else {
+                $escaped = htmlspecialchars($valStr, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+                $sheetXml .= '<c r="' . $cellRef . '" t="inlineStr"><is><t>' . $escaped . '</t></is></c>';
+            }
+            $cNum++;
+        }
+        $sheetXml .= '</row>';
+        $rNum++;
+    }
+
+    $sheetXml .= '</sheetData></worksheet>';
+
+    $zip->addFromString('[Content_Types].xml', $contentTypes);
+    $zip->addFromString('_rels/.rels', $rels);
+    $zip->addFromString('xl/workbook.xml', $workbook);
+    $zip->addFromString('xl/_rels/workbook.xml.rels', $workbookRels);
+    $zip->addFromString('xl/worksheets/sheet1.xml', $sheetXml);
+    $zip->close();
+
+    return file_exists($outputPath);
 }
 
 /*
@@ -382,7 +586,7 @@ function syncItemToMasterCore(string $itemNumber, string $itemName, ?int $userId
             $prevYears = !empty($existingMaster->compatible_years) ? array_map('trim', explode('|', $existingMaster->compatible_years)) : [];
 
             $mergedCars  = implode(' | ', array_values(array_unique(array_filter(array_merge($prevCars, $masterCarsPool)))));
-            $mergedYears = implode(' | ', array_values(array_unique(array_filter(array_merge($prevYears, $mInfoYears ?? $masterYearsPool)))));
+            $mergedYears = implode(' | ', array_values(array_unique(array_filter(array_merge($prevYears, $masterYearsPool)))));
 
             DB::table('master_items')->where('item_number', $cleanNumber)->update([
                 'compatible_cars'  => $mergedCars ?: null,
@@ -528,7 +732,7 @@ function detectCustomerInquiryExcelColumns(array $rows): array {
     if ($partCol === null) {
         $colScoresPart = [];
         $colScoresQty  = [];
-        $sampleRows = array_slice($rows, 0, 10);
+        $sampleRows = array_slice($rows, 0, 15);
 
         foreach ($sampleRows as $rIdx => $r) {
             if (!is_array($r)) continue;
@@ -939,19 +1143,44 @@ function parseUploadedSpreadsheetFileRows(string $filePath): array {
         return $rows;
     }
 
+    // 1. محاولة القراءة عبر PhpSpreadsheet إن وجدت
     if (class_exists(\PhpOffice\PhpSpreadsheet\IOFactory::class)) {
-        $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($filePath);
-        $reader->setReadDataOnly(true);
-        $spreadsheet = $reader->load($filePath);
-        return $spreadsheet->getActiveSheet()->toArray(null, true, true, false);
+        try {
+            $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($filePath);
+            $reader->setReadDataOnly(true);
+            $spreadsheet = $reader->load($filePath);
+            $rows = $spreadsheet->getActiveSheet()->toArray(null, true, true, false);
+            if (!empty($rows)) {
+                return $rows;
+            }
+        } catch (\Throwable $e) {}
     }
 
+    // 2. محاولة القراءة عبر Maatwebsite Excel إن وجدت
     if (class_exists(\Maatwebsite\Excel\Facades\Excel::class)) {
-        $sheets = \Maatwebsite\Excel\Facades\Excel::toArray(new \stdClass(), $filePath);
-        return $sheets[0] ?? [];
+        try {
+            $sheets = \Maatwebsite\Excel\Facades\Excel::toArray(new \stdClass(), $filePath);
+            if (!empty($sheets[0])) {
+                return $sheets[0];
+            }
+        } catch (\Throwable $e) {}
     }
 
-    return [];
+    // 3. قارئ XLSX المدمج المباشر (يعمل دائماً على السيرفر بدون أي مكتبات خارجية)
+    $nativeRows = parseXlsxFileNativeFallback($filePath);
+    if (!empty($nativeRows)) {
+        return $nativeRows;
+    }
+
+    // 4. محاولة أخيرة كـ CSV في حال كان الملف نصياً بامتداد مختلف
+    $fallbackCsv = [];
+    if (($handle = @fopen($filePath, 'r')) !== false) {
+        while (($data = fgetcsv($handle, 0, ',')) !== false) {
+            $fallbackCsv[] = $data;
+        }
+        fclose($handle);
+    }
+    return $fallbackCsv;
 }
 
 function runBackgroundImportJobWorker(int $jobId): void {
@@ -1069,7 +1298,6 @@ function extractPartNumbersWithQuantitiesFromText(string $text, ?int $ownerUserI
         return [];
     }
 
-    // استرجاع كافة أرقام الأصناف للمستخدم في الذاكرة لسرعة فائقة حتى لو أرسل العميل 500 صنف دفعة واحدة
     static $cachedUserItemsMap = [];
     if ($ownerUserId !== null && !isset($cachedUserItemsMap[$ownerUserId])) {
         $allNums = DB::table('items')
@@ -1096,7 +1324,6 @@ function extractPartNumbersWithQuantitiesFromText(string $text, ?int $ownerUserI
 
         $lineParts = [];
 
-        // 1. استخراج الأرقام التي تحتوي على شرطة (مثل 90919-01289)
         if (preg_match_all('/[A-Za-z0-9]{2,}[\-][A-Za-z0-9\-]{2,}/u', $line, $pm)) {
             foreach ($pm[0] as $partNum) {
                 if (!preg_match('/^(?:19|20)?\d{2}[\-](?:19|20)?\d{2}$/', $partNum)) {
@@ -1105,7 +1332,6 @@ function extractPartNumbersWithQuantitiesFromText(string $text, ?int $ownerUserI
             }
         }
 
-        // 2. فصل السطر بأي فواصل أو علامات (= أو * أو مسافة أو فاصلة) لاستخراج كل الأصناف
         $tokens = preg_split('/[\s,،\t:;\/\|\(\)\[\]\=\*xX×]+/u', $line, -1, PREG_SPLIT_NO_EMPTY);
         foreach ($tokens as $tk) {
             $cleanTk = strtoupper(trim($tk, '-_*.،,؟?!: '));
@@ -1128,7 +1354,6 @@ function extractPartNumbersWithQuantitiesFromText(string $text, ?int $ownerUserI
         $lineParts = array_values(array_unique($lineParts));
         if (empty($lineParts)) continue;
 
-        // حساب الكمية المطلوبة لأغراض إحصائيات الرادار فقط (دون إجبار ظهورها في الرد النصي)
         $detectedLineQty = 1;
         if (count($lineParts) === 1) {
             $singlePart      = $lineParts[0];
@@ -1165,20 +1390,19 @@ function extractPartNumbersFromWhatsappText(string $text, ?int $ownerUserId = nu
     return array_values(array_map(fn($i) => $i['part_number'], $items));
 }
 
-function extractExcelItemsFromWhatsappPayload(array $payload): array {
+function extractExcelItemsFromWhatsappPayload(array $payload, array $settings = []): array {
     $fileName   = '';
     $mimeType   = '';
     $mediaUrl   = '';
     $base64Data = '';
 
-    // بحث شامل وعميق في كل الحقول الممكنة داخل Payload الواتساب لالتقاط الملف المرفق
     array_walk_recursive($payload, function ($value, $key) use (&$fileName, &$mimeType, &$mediaUrl, &$base64Data) {
         if (!is_string($value) && !is_numeric($value)) return;
         $valStr = trim((string) $value);
         if ($valStr === '') return;
         $kLower = strtolower((string) $key);
 
-        if ($fileName === '' && in_array($kLower, ['filename', 'file_name', 'title', 'name'], true) && preg_match('/\.(xlsx|xls|csv)$/i', $valStr)) {
+        if ($fileName === '' && in_array($kLower, ['filename', 'file_name', 'title', 'name', 'caption'], true) && preg_match('/\.(xlsx|xls|csv)$/i', $valStr)) {
             $fileName = $valStr;
         }
         if ($mimeType === '' && in_array($kLower, ['mimetype', 'mime_type', 'content_type', 'type'], true) && (
@@ -1193,17 +1417,18 @@ function extractExcelItemsFromWhatsappPayload(array $payload): array {
         if ($mediaUrl === '' && filter_var($valStr, FILTER_VALIDATE_URL)) {
             if (
                 in_array($kLower, ['media_url', 'mediaurl', 'file_url', 'fileurl', 'document_url', 'download_url', 'url', 'link', 'media'], true) ||
-                preg_match('/\.(xlsx|xls|csv)(\?|$)/i', $valStr)
+                preg_match('/\.(xlsx|xls|csv)(\?|$)/i', $valStr) ||
+                str_contains($valStr, 'mmg.whatsapp.net')
             ) {
                 $mediaUrl = $valStr;
             }
         }
         if ($base64Data === '' && (
-            in_array($kLower, ['base64', 'media_base64', 'file_base64', 'data', 'body', 'content'], true) ||
+            in_array($kLower, ['base64', 'media_base64', 'file_base64', 'data', 'body', 'content', 'file'], true) ||
             str_starts_with($valStr, 'data:application/')
         )) {
             $cleanB64 = preg_replace('/^data:[^;]+;base64,/', '', $valStr);
-            if (strlen($cleanB64) > 120 && (str_starts_with($cleanB64, 'UEsDB') || str_starts_with($cleanB64, '0M8R4'))) {
+            if (strlen($cleanB64) > 100 && (str_starts_with($cleanB64, 'UEsDB') || str_starts_with($cleanB64, '0M8R4'))) {
                 $base64Data = $cleanB64;
             } elseif (in_array($kLower, ['base64', 'media_base64', 'file_base64'], true) && strlen($cleanB64) > 60) {
                 $base64Data = $cleanB64;
@@ -1213,7 +1438,7 @@ function extractExcelItemsFromWhatsappPayload(array $payload): array {
 
     $rawJson = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '';
     $isDocumentMsg = str_contains($rawJson, 'documentMessage')
-                  || str_contains($rawJson, 'document')
+                  || str_contains($rawJson, 'documentWithCaptionMessage')
                   || $fileName !== ''
                   || $mimeType !== ''
                   || $base64Data !== ''
@@ -1253,7 +1478,13 @@ function extractExcelItemsFromWhatsappPayload(array $payload): array {
         }
 
         if (!$downloaded && $mediaUrl !== '' && filter_var($mediaUrl, FILTER_VALIDATE_URL)) {
-            $resp = Http::withoutVerifying()->timeout(30)->get($mediaUrl);
+            $apiToken = trim($settings['whatsapp_api_token'] ?? '');
+            $headers  = [];
+            if ($apiToken !== '') {
+                $headers['Authorization'] = 'Bearer ' . $apiToken;
+                $headers['X-Api-Key']     = $apiToken;
+            }
+            $resp = Http::withHeaders($headers)->withoutVerifying()->timeout(30)->get($mediaUrl);
             if ($resp->successful() && strlen($resp->body()) > 16) {
                 file_put_contents($tempFile, $resp->body());
                 $downloaded = true;
@@ -1264,7 +1495,6 @@ function extractExcelItemsFromWhatsappPayload(array $payload): array {
             return [];
         }
 
-        // التحقق الذكي من توقيع الملف (إذا كان ملف ZIP/XLSX حقيقي أو CSV)
         $headBytes = file_get_contents($tempFile, false, null, 0, 8);
         if ($headBytes !== false && str_starts_with($headBytes, "PK\x03\x04") && $ext !== 'xlsx') {
             $newTemp = $tempFile . '.xlsx';
@@ -1330,12 +1560,13 @@ function extractExcelItemsFromWhatsappPayload(array $payload): array {
 
 /*
 |--------------------------------------------------------------------------
-| 5. دوال إعدادات البوت وإرسال رسائل الواتساب ومعالجة الويب هوك (Webhook)
+| 5. دوال إعدادات البوت وإرسال رسائل وملفات الواتساب ومعالجة الويب هوك (Webhook)
 |--------------------------------------------------------------------------
 */
 
 function getUserBotSettings(int $userId): array {
     $defaults = [
+        'bot_enabled'           => "1",
         'reply_available'       => "القطعة متوفرة لدينا ✅\nاسم الصنف: {item_name}\nرقم الصنف: {item_number}\nالكمية المتوفرة: {quantity}\nالسعر: {price} ريال",
         'reply_unavailable'     => "غير متوفر ❌",
         'reply_quota_exceeded'  => "نعتذر منك، لقد استنفدت الحد المسموح به للاستعلام الآلي.",
@@ -1393,9 +1624,6 @@ function formatBotTemplate(string $template, array $data): string {
     return $output;
 }
 
-/**
- * توليد رسالة عدم التوفر لكل رقم صنف بشكل منفصل تماماً
- */
 function buildSingleUnavailableItemReply(string $template, string $partNumber, string $clientName, string $phone): string {
     $tpl = trim($template);
     if ($tpl === '') {
@@ -1481,7 +1709,6 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
             $headers['X-Api-Key']     = $apiToken;
         }
 
-        // تقسيم الرسائل الضخمة (مثل تسعير 100 أو 500 صنف دفعة واحدة) إلى رسائل متتالية حتى لا يرفضها مزود الواتساب
         $maxCharsPerMsg = 3500;
         $chunks = [];
         if (mb_strlen($replyText) <= $maxCharsPerMsg) {
@@ -1505,7 +1732,7 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
         foreach ($chunks as $idx => $chunkText) {
             try {
                 if ($idx > 0) {
-                    usleep(350000); // فاصل بسيط 0.35 ثانية لضمان وصول الدفعات بالترتيب
+                    usleep(350000);
                 }
                 Http::withHeaders($headers)->withoutVerifying()->timeout(20)->post($apiUrl, [
                     'session_id'      => $sessionId,
@@ -1525,11 +1752,66 @@ function sendWhatsappReplyMessage(array $settings, string $cleanPhone, string $r
                     'text'            => $chunkText,
                     'content'         => $chunkText,
                 ]);
-            } catch (\Throwable $e) {
-                // تجاهل أخطاء الشبكة الخارجية
-            }
+            } catch (\Throwable $e) {}
         }
     }
+}
+
+/**
+ * إرسال ملف إكسل (`.xlsx`) للعميل على الواتساب يحتوي على تسعير الأصناف حسب صلاحياته
+ */
+function sendWhatsappExcelDocument(array $settings, string $cleanPhone, string $rawSender, $convId, string $filePath, string $fileName, string $caption): void {
+    $apiUrl    = trim($settings['whatsapp_api_url'] ?? '');
+    $apiToken  = trim($settings['whatsapp_api_token'] ?? '');
+    $sessionId = trim($settings['whatsapp_session_id'] ?? '');
+
+    if (empty($apiUrl) || !file_exists($filePath)) {
+        return;
+    }
+
+    $publicUrl  = route('public.whatsapp.excel.download', ['file' => basename($filePath)]);
+    $base64File = base64_encode((string) file_get_contents($filePath));
+    $mime       = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+    $headers = ['Accept' => 'application/json'];
+    if (!empty($apiToken)) {
+        $headers['Authorization'] = 'Bearer ' . $apiToken;
+        $headers['X-Api-Key']     = $apiToken;
+    }
+
+    try {
+        Http::withHeaders($headers)->withoutVerifying()->timeout(25)->post($apiUrl, [
+            'session_id'      => $sessionId,
+            'sessionId'       => $sessionId,
+            'session'         => $sessionId,
+            'instance_id'     => $sessionId,
+            'token'           => $apiToken,
+            'api_key'         => $apiToken,
+            'to'              => $cleanPhone,
+            'phone'           => $cleanPhone,
+            'recipient'       => $cleanPhone,
+            'number'          => $cleanPhone,
+            'chatId'          => $rawSender,
+            'conversation_id' => $convId,
+            'type'            => 'document',
+            'media_type'      => 'document',
+            'fileName'        => $fileName,
+            'filename'        => $fileName,
+            'file_name'       => $fileName,
+            'mimetype'        => $mime,
+            'mime_type'       => $mime,
+            'media_url'       => $publicUrl,
+            'file_url'        => $publicUrl,
+            'document'        => $publicUrl,
+            'url'             => $publicUrl,
+            'base64'          => 'data:' . $mime . ';base64,' . $base64File,
+            'file_base64'     => $base64File,
+            'caption'         => $caption,
+            'body'            => $caption . "\n📥 رابط تحميل ملف الإكسل:\n" . $publicUrl,
+            'message'         => $caption . "\n📥 رابط تحميل ملف الإكسل:\n" . $publicUrl,
+            'text'            => $caption . "\n📥 رابط تحميل ملف الإكسل:\n" . $publicUrl,
+        ]);
+    } catch (\Throwable $e) {}
 }
 
 function sendWhatsappLoginOtp(User $user, string $otpCode): bool {
@@ -1645,7 +1927,10 @@ function isWithinAllowedTimeWindow(?string $startTime, ?string $endTime): bool {
     }
 }
 
-function checkAndResetQuotaAutomatically(int $ownerUserId, string $phoneKey, $quotaRecord, string $resetPeriod): int {
+/**
+ * فحص وتصفير الحصة تلقائياً حسب دورة التصفير (يومي / أسبوعي / شهري / يدوي)
+ */
+function checkAndResetQuotaAutomatically(int $ownerUserId, array $phoneVariants, $quotaRecord, string $resetPeriod): int {
     if (!$quotaRecord) {
         return 0;
     }
@@ -1665,7 +1950,9 @@ function checkAndResetQuotaAutomatically(int $ownerUserId, string $phoneKey, $qu
         $now     = Carbon::now('Asia/Riyadh');
         $shouldReset = false;
 
-        if ($resetPeriod === 'daily' && $refDate->diffInHours($now) >= 24) {
+        if ($resetPeriod === 'daily' && ($refDate->format('Y-m-d') !== $now->format('Y-m-d') || $refDate->diffInHours($now) >= 24)) {
+            $shouldReset = true;
+        } elseif ($resetPeriod === 'weekly' && $refDate->diffInDays($now) >= 7) {
             $shouldReset = true;
         } elseif ($resetPeriod === 'monthly' && ($refDate->month !== $now->month || $refDate->year !== $now->year)) {
             $shouldReset = true;
@@ -1674,7 +1961,7 @@ function checkAndResetQuotaAutomatically(int $ownerUserId, string $phoneKey, $qu
         if ($shouldReset) {
             DB::table('whatsapp_customer_quotas')
                 ->where('user_id', $ownerUserId)
-                ->where('phone', $phoneKey)
+                ->whereIn('phone', $phoneVariants)
                 ->update([
                     'queries_count' => 0,
                     'last_reset_at' => now(),
@@ -1682,16 +1969,11 @@ function checkAndResetQuotaAutomatically(int $ownerUserId, string $phoneKey, $qu
                 ]);
             return 0;
         }
-    } catch (\Throwable $e) {
-        // تجاهل الخطأ
-    }
+    } catch (\Throwable $e) {}
 
     return $currentCount;
 }
 
-/**
- * تسجيل الاستعلام في جدول الرادار الموحد
- */
 function recordRadarInquiryLog(
     int $ownerUserId,
     string $phone,
@@ -1726,9 +2008,6 @@ function recordRadarInquiryLog(
     ]);
 }
 
-/**
- * توليد كل الصيغ المحتملة لرقم الجوال لضمان مطابقة الرقم في الاستثناءات والقائمة السوداء 100%
- */
 function getPhoneMatchVariants(string $normalizedPhone): array {
     $variants = [$normalizedPhone];
     if (str_starts_with($normalizedPhone, '966') && strlen($normalizedPhone) === 12) {
@@ -1763,6 +2042,7 @@ function handleWebhook(Request $request) {
     $ownerUserId = resolveWebhookOwnerUserId($request, $payload);
     $ownerUser   = User::find($ownerUserId);
     $settings    = getUserBotSettings($ownerUserId);
+    $isBotActive = ($settings['bot_enabled'] ?? '1') === '1';
     $allowGroups = ($settings['allow_group_replies'] ?? '0') === '1';
 
     $groupCheck = detectGroupAndBroadcastStatus($payload);
@@ -1771,7 +2051,7 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_broadcast_or_status'], 200);
     }
 
-    if ($groupCheck['is_group'] && !$allowGroups) {
+    if ($groupCheck['is_group'] && !$allowGroups && $isBotActive) {
         return response()->json(['status' => 'ignored_group_message_completely'], 200);
     }
 
@@ -1782,7 +2062,6 @@ function handleWebhook(Request $request) {
         'updated_at' => now(),
     ]);
 
-    // إذا كانت الرسالة من قروب مسموح، نأخذ رقم العضو المرسل لفحص استثنائه وحصته بدقة
     $participantPhone = data_get($payload, 'data.participant')
                      ?? data_get($payload, 'data.key.participant')
                      ?? data_get($payload, 'data.message.participant')
@@ -1825,34 +2104,11 @@ function handleWebhook(Request $request) {
 
     $phoneVariants = getPhoneMatchVariants($quotaPhoneKey);
 
-    // 1. فحص القائمة السوداء بجميع صيغ الرقم
-    $isBlacklisted = DB::table('whatsapp_blacklist_phones')
-        ->where('user_id', $ownerUserId)
-        ->whereIn('phone', $phoneVariants)
-        ->exists();
-
-    if ($isBlacklisted) {
-        return response()->json(['status' => 'ignored_blacklisted_phone'], 200);
-    }
-
-    // 2. فحص الاستثناء والوقت المسموح بجميع صيغ الرقم
-    $whitelistRecord = DB::table('whatsapp_whitelist_phones')
-        ->where('user_id', $ownerUserId)
-        ->whereIn('phone', $phoneVariants)
-        ->first();
-
-    if ($whitelistRecord && !isWithinAllowedTimeWindow($whitelistRecord->allowed_start_time ?? null, $whitelistRecord->allowed_end_time ?? null)) {
-        return response()->json(['status' => 'ignored_outside_whitelist_allowed_hours'], 200);
-    }
-
-    // 3. فحص هل أرسل العميل ملف إكسل أو نص عادي
-    $excelInquiries = extractExcelItemsFromWhatsappPayload($payload);
+    // استخراج الأصناف من ملف إكسل أو من نص الرسالة أولاً (حتى يتم تسجيلها في الرادار حتى لو كان البوت متوقفاً)
+    $excelInquiries = extractExcelItemsFromWhatsappPayload($payload, $settings);
     $isExcelSource  = !empty($excelInquiries);
 
     if ($isExcelSource) {
-        if ($whitelistRecord && !((bool) ($whitelistRecord->allow_excel ?? true))) {
-            return response()->json(['status' => 'ignored_excel_disabled_for_this_whitelist_phone'], 200);
-        }
         $requestedItems = $excelInquiries;
     } else {
         $messageText = data_get($payload, 'data.message_body')
@@ -1893,26 +2149,70 @@ function handleWebhook(Request $request) {
         return response()->json(['status' => 'ignored_no_part_number_detected'], 200);
     }
 
-    // 4. فحص الحصة والتصفير التلقائي (إذا كان الرقم مستثنى ومفتوح 0 فسيتم تسعير أي عدد من الأصناف حتى لو 500 صنف)
+    // إذا كان البوت متوقفاً: يسجل جميع الأصناف في صفحة الأصناف المطلوبة (الرادار) بصمت تام ولا يرد أبداً
+    if (!$isBotActive) {
+        foreach ($requestedItems as $reqEntry) {
+            $pNum   = $reqEntry['part_number'];
+            $reqQty = max(1, (int) ($reqEntry['requested_qty'] ?? 1));
+            $item   = findExactItemIgnoringDashes($ownerUserId, $pNum, true);
+
+            if ($item) {
+                recordRadarInquiryLog($ownerUserId, $quotaPhoneKey, $item->item_number, $item->item_name, 'available', $reqQty, (int) $item->quantity, (float) $item->price, $isExcelSource ? 'excel' : 'text');
+            } else {
+                recordRadarInquiryLog($ownerUserId, $quotaPhoneKey, $pNum, null, 'unavailable', $reqQty, 0, null, $isExcelSource ? 'excel' : 'text');
+            }
+        }
+        return response()->json(['status' => 'bot_disabled_logged_silently_to_radar', 'logged_items' => count($requestedItems)], 200);
+    }
+
+    // 1. فحص القائمة السوداء
+    $isBlacklisted = DB::table('whatsapp_blacklist_phones')
+        ->where('user_id', $ownerUserId)
+        ->whereIn('phone', $phoneVariants)
+        ->exists();
+
+    if ($isBlacklisted) {
+        return response()->json(['status' => 'ignored_blacklisted_phone'], 200);
+    }
+
+    // 2. فحص الاستثناء والوقت المسموح
+    $whitelistRecord = DB::table('whatsapp_whitelist_phones')
+        ->where('user_id', $ownerUserId)
+        ->whereIn('phone', $phoneVariants)
+        ->first();
+
+    if ($whitelistRecord && !isWithinAllowedTimeWindow($whitelistRecord->allowed_start_time ?? null, $whitelistRecord->allowed_end_time ?? null)) {
+        return response()->json(['status' => 'ignored_outside_whitelist_allowed_hours'], 200);
+    }
+
+    if ($isExcelSource && $whitelistRecord && !((bool) ($whitelistRecord->allow_excel ?? true))) {
+        return response()->json(['status' => 'ignored_excel_disabled_for_this_whitelist_phone'], 200);
+    }
+
+    // 3. فحص الحصة ودورة التصفير (الخاصة بالرقم المستثنى أو العامة)
     $msgAvailable     = trim($settings['reply_available'] ?? '');
     $msgUnavailable   = trim($settings['reply_unavailable'] ?? '');
     $msgQuotaExceeded = trim($settings['reply_quota_exceeded'] ?? '');
     $maxQueriesLimit  = (int) ($settings['max_queries_per_phone'] ?? 0);
-    $resetPeriod      = $settings['quota_reset_period'] ?? 'manual';
+    $globalReset      = $settings['quota_reset_period'] ?? 'manual';
     $sessionId        = trim($settings['whatsapp_session_id'] ?? '');
     $convId           = data_get($payload, 'data.conversation_id', data_get($payload, 'conversation_id'));
+
+    $effectiveResetPeriod = ($whitelistRecord && !empty($whitelistRecord->reset_period) && $whitelistRecord->reset_period !== 'default')
+        ? $whitelistRecord->reset_period
+        : $globalReset;
 
     $quotaRecord = DB::table('whatsapp_customer_quotas')
         ->where('user_id', $ownerUserId)
         ->whereIn('phone', $phoneVariants)
         ->first();
 
-    $currentQueriesUsed = checkAndResetQuotaAutomatically($ownerUserId, $quotaPhoneKey, $quotaRecord, $resetPeriod);
+    $currentQueriesUsed = checkAndResetQuotaAutomatically($ownerUserId, $phoneVariants, $quotaRecord, $effectiveResetPeriod);
 
     $effectiveLimit = null;
     if ($whitelistRecord) {
         $cQuota = (int) ($whitelistRecord->custom_quota ?? 0);
-        $effectiveLimit = $cQuota > 0 ? $cQuota : null; // null تعني مفتوح بلا حدود نهائياً
+        $effectiveLimit = $cQuota > 0 ? $cQuota : null;
     } else {
         $effectiveLimit = $maxQueriesLimit > 0 ? $maxQueriesLimit : null;
     }
@@ -1944,6 +2244,7 @@ function handleWebhook(Request $request) {
     $canShowQuantities  = $whitelistRecord ? (bool) ($whitelistRecord->allow_quantities ?? true) : true;
 
     $replyBlocks    = [];
+    $excelReplyRows = [];
     $countedQueries = 0;
     $now            = now();
 
@@ -1970,30 +2271,38 @@ function handleWebhook(Request $request) {
                 $isExcelSource ? 'excel' : 'text'
             );
 
-            // الالتزام الصارم والنهائي بقالب رسالة التوفر المحددة في الإعدادات فقط بدون أي إضافات خارجية
-            if ($canShowAvailable && $msgAvailable !== '') {
-                $priceDisplay = $canShowPrices ? (string) $item->price : '';
-                $qtyDisplay   = $canShowQuantities ? (string) $fulfilledQty : '';
+            if ($canShowAvailable) {
+                if ($isExcelSource) {
+                    $rowCells = [$item->item_number, $item->item_name, 'متوفر'];
+                    if ($canShowQuantities) $rowCells[] = $fulfilledQty;
+                    if ($canShowPrices)     $rowCells[] = (float) $item->price;
+                    $excelReplyRows[] = $rowCells;
+                }
 
-                $formattedBlock = formatBotTemplate($msgAvailable, [
-                    'item_name'     => $item->item_name,
-                    'item_number'   => $item->item_number,
-                    'price'         => $priceDisplay,
-                    'quantity'      => $qtyDisplay,
-                    'requested_qty' => (string) $reqQty,
-                    'car'           => $item->detected_car_name ?? '',
-                    'category'      => $item->detected_category ?? '',
-                    'year'          => $item->detected_years ?? '',
-                    'part'          => $pNum,
-                    'client_name'   => $ownerUser->name ?? '',
-                    'phone'         => $quotaPhoneKey,
-                    'items'         => "- {$item->item_name} (رقم: {$item->item_number})"
-                        . ($canShowQuantities ? " | المتوفر: {$fulfilledQty}" : "")
-                        . ($canShowPrices ? " | السعر: {$item->price} ريال" : ""),
-                ]);
+                if ($msgAvailable !== '') {
+                    $priceDisplay = $canShowPrices ? (string) $item->price : '';
+                    $qtyDisplay   = $canShowQuantities ? (string) $fulfilledQty : '';
 
-                if ($formattedBlock !== '') {
-                    $replyBlocks[] = $formattedBlock;
+                    $formattedBlock = formatBotTemplate($msgAvailable, [
+                        'item_name'     => $item->item_name,
+                        'item_number'   => $item->item_number,
+                        'price'         => $priceDisplay,
+                        'quantity'      => $qtyDisplay,
+                        'requested_qty' => (string) $reqQty,
+                        'car'           => $item->detected_car_name ?? '',
+                        'category'      => $item->detected_category ?? '',
+                        'year'          => $item->detected_years ?? '',
+                        'part'          => $pNum,
+                        'client_name'   => $ownerUser->name ?? '',
+                        'phone'         => $quotaPhoneKey,
+                        'items'         => "- {$item->item_name} (رقم: {$item->item_number})"
+                            . ($canShowQuantities ? " | المتوفر: {$fulfilledQty}" : "")
+                            . ($canShowPrices ? " | السعر: {$item->price} ريال" : ""),
+                    ]);
+
+                    if ($formattedBlock !== '') {
+                        $replyBlocks[] = $formattedBlock;
+                    }
                 }
             }
         } else {
@@ -2009,15 +2318,24 @@ function handleWebhook(Request $request) {
                 $isExcelSource ? 'excel' : 'text'
             );
 
-            if ($canShowUnavailable && $msgUnavailable !== '') {
-                $singleUnavailBlock = buildSingleUnavailableItemReply(
-                    $msgUnavailable,
-                    $pNum,
-                    (string) ($ownerUser->name ?? ''),
-                    $quotaPhoneKey
-                );
-                if ($singleUnavailBlock !== '') {
-                    $replyBlocks[] = $singleUnavailBlock;
+            if ($canShowUnavailable) {
+                if ($isExcelSource) {
+                    $rowCells = [$pNum, '—', 'غير متوفر'];
+                    if ($canShowQuantities) $rowCells[] = 0;
+                    if ($canShowPrices)     $rowCells[] = '—';
+                    $excelReplyRows[] = $rowCells;
+                }
+
+                if ($msgUnavailable !== '') {
+                    $singleUnavailBlock = buildSingleUnavailableItemReply(
+                        $msgUnavailable,
+                        $pNum,
+                        (string) ($ownerUser->name ?? ''),
+                        $quotaPhoneKey
+                    );
+                    if ($singleUnavailBlock !== '') {
+                        $replyBlocks[] = $singleUnavailBlock;
+                    }
                 }
             }
         }
@@ -2040,11 +2358,26 @@ function handleWebhook(Request $request) {
         ]
     );
 
-    $finalDirectReply = implode("\n\n", array_values(array_filter($replyBlocks)));
+    // إذا كان الاستعلام بملف إكسل: ننشئ ملف إكسل (.xlsx) بالنتيجة ونرسله للعميل
+    if ($isExcelSource && !empty($excelReplyRows)) {
+        $excelHeaders = ['رقم الصنف', 'اسم الصنف', 'الحالة'];
+        if ($canShowQuantities) $excelHeaders[] = 'الكمية المتوفرة';
+        if ($canShowPrices)     $excelHeaders[] = 'السعر';
 
-    if ($isExcelSource && $finalDirectReply !== '') {
-        $finalDirectReply = "📊 *نتيجة فحص ملف الإكسل ({$countedQueries} صنف):*\n\n" . $finalDirectReply;
+        $outDir = storage_path('app/public/whatsapp_exports');
+        if (!is_dir($outDir)) {
+            @mkdir($outDir, 0775, true);
+        }
+        $outFileName = 'pricing_' . date('Ymd_His') . '_' . uniqid() . '.xlsx';
+        $outFullPath = $outDir . DIRECTORY_SEPARATOR . $outFileName;
+
+        if (generateExcelReplyFileXlsx($excelHeaders, $excelReplyRows, $outFullPath)) {
+            $caption = "📊 *تم فحص وتسعير ملف الإكسل ({$countedQueries} صنف)*";
+            sendWhatsappExcelDocument($settings, $cleanPhone, $rawSender, $convId, $outFullPath, 'نتيجة_التسعير.xlsx', $caption);
+        }
     }
+
+    $finalDirectReply = implode("\n\n", array_values(array_filter($replyBlocks)));
 
     if ($finalDirectReply === '') {
         return response()->json(['status' => 'skipped_empty_template_or_permissions'], 200);
@@ -2060,520 +2393,14 @@ function handleWebhook(Request $request) {
         'message'         => $finalDirectReply,
         'text'            => $finalDirectReply,
         'body'            => $finalDirectReply,
-        'data'            => [
-            'session_id' => $sessionId,
-            'reply'      => $finalDirectReply,
-            'message'    => $finalDirectReply,
-            'text'       => $finalDirectReply,
-        ],
     ], 200);
 }
 
 /*
 |--------------------------------------------------------------------------
-| 6. دوال بناء الصفحات المستقلة وحقن روابط القائمة الجانبية (Sidebar Navigation)
+| 6. دوال بناء الصفحات المستقلة وحقن روابط القائمة الجانبية وزر تشغيل/إيقاف البوت
 |--------------------------------------------------------------------------
 */
-
-/**
- * حقن روابط الصفحات المستقلة الجديدة في القائمة الجانبية اليمنى (Sidebar) تلقائياً في كل الصفحات:
- * 1. رابط "🛡️ الاستثناءات والحصص" (تحت الرد الآلي مباشرة لجميع المستخدمين)
- * 2. رابط "📡 الاصناف المطلوبة" (تحت قسم المدير للأدمن فقط)
- */
-function injectAdminVisualEditor(string $html): string {
-    if (!auth()->check() || auth()->user()->role !== 'admin') {
-        return $html;
-    }
-
-    $currPath = request()->path() ?: '/';
-    $savedCustomizations = [];
-    try {
-        if (Schema::hasTable('ui_customizations')) {
-            $savedCustomizations = DB::table('ui_customizations')
-                ->whereIn('page_path', [$currPath, '*'])
-                ->get()
-                ->keyBy('selector')
-                ->toArray();
-        }
-    } catch (\Throwable $e) {
-        $savedCustomizations = [];
-    }
-
-    $savedJson = json_encode($savedCustomizations, JSON_UNESCAPED_UNICODE);
-    $saveUrl   = route('ui.customizations.save');
-    $resetUrl  = route('ui.customizations.reset');
-    $csrfToken = csrf_token();
-
-    $editorAssets = <<<HTML
-<!-- EPC Visual Live Mouse Editor -->
-<style>
-    .epc-ve-hover {
-        outline: 2px dashed #2563eb !important;
-        outline-offset: 2px !important;
-        cursor: pointer !important;
-        transition: outline 0.1s ease;
-    }
-    .epc-ve-selected {
-        outline: 3px solid #16a34a !important;
-        outline-offset: 3px !important;
-    }
-    #epc-ve-toggle-btn {
-        position: fixed;
-        bottom: 20px;
-        left: 20px;
-        z-index: 99998;
-        background: #0f172a;
-        color: #ffffff;
-        border: 2px solid #334155;
-        padding: 10px 18px;
-        border-radius: 999px;
-        font-weight: 800;
-        font-size: 13px;
-        cursor: pointer;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.25);
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        direction: rtl;
-        transition: all 0.2s ease;
-    }
-    #epc-ve-toggle-btn.active {
-        background: #16a34a;
-        border-color: #bbf7d0;
-    }
-    #epc-ve-panel {
-        position: fixed;
-        top: 80px;
-        left: 20px;
-        width: 320px;
-        background: #ffffff;
-        border: 1px solid #cbd5e1;
-        border-radius: 16px;
-        box-shadow: 0 20px 35px rgba(15,23,42,0.2);
-        z-index: 99999;
-        display: none;
-        direction: rtl;
-        overflow: hidden;
-        font-family: inherit;
-    }
-    .epc-ve-header {
-        background: #0f172a;
-        color: #fff;
-        padding: 12px 16px;
-        font-weight: 800;
-        font-size: 14px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        cursor: move;
-    }
-    .epc-ve-body {
-        padding: 14px 16px;
-        max-height: 75vh;
-        overflow-y: auto;
-    }
-    .epc-ve-field {
-        margin-bottom: 10px;
-    }
-    .epc-ve-field label {
-        display: block;
-        font-size: 12px;
-        font-weight: 700;
-        color: #334155;
-        margin-bottom: 4px;
-    }
-    .epc-ve-field input[type="text"],
-    .epc-ve-field input[type="number"] {
-        width: 100%;
-        padding: 7px 10px;
-        border: 1px solid #cbd5e1;
-        border-radius: 8px;
-        font-size: 13px;
-    }
-    .epc-ve-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-    }
-</style>
-
-<button type="button" id="epc-ve-toggle-btn" title="تفعيل أو إيقاف تعديل عناصر الصفحة بالماوس">
-    🎨 <span>تعديل الواجهة بالماوس: متوقف</span>
-</button>
-
-<div id="epc-ve-panel">
-    <div class="epc-ve-header" id="epc-ve-panel-header">
-        <span>🛠️ خصائص العنصر المحدد</span>
-        <button type="button" id="epc-ve-close" style="background:transparent;border:none;color:#fff;font-size:16px;cursor:pointer;">✕</button>
-    </div>
-    <div class="epc-ve-body">
-        <div class="epc-ve-field">
-            <label>النص / العنوان الداخلي:</label>
-            <input type="text" id="epc-ve-text" placeholder="نص الزر أو العنوان">
-        </div>
-        <div class="epc-ve-field" id="epc-ve-placeholder-wrap" style="display:none;">
-            <label>النص التوضيحي للخانة (Placeholder):</label>
-            <input type="text" id="epc-ve-placeholder" placeholder="مثال: ادخل رقم الصنف...">
-        </div>
-        <div class="epc-ve-grid">
-            <div class="epc-ve-field">
-                <label>لون الخلفية:</label>
-                <input type="color" id="epc-ve-bg" style="width:100%;height:34px;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">
-            </div>
-            <div class="epc-ve-field">
-                <label>لون الخط:</label>
-                <input type="color" id="epc-ve-color" style="width:100%;height:34px;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">
-            </div>
-        </div>
-        <div class="epc-ve-grid">
-            <div class="epc-ve-field">
-                <label>حجم الخط (px):</label>
-                <input type="number" id="epc-ve-fontsize" placeholder="14">
-            </div>
-            <div class="epc-ve-field">
-                <label>استدارة الحواف (px):</label>
-                <input type="number" id="epc-ve-radius" placeholder="8">
-            </div>
-        </div>
-        <div class="epc-ve-grid">
-            <div class="epc-ve-field">
-                <label>تحريك أفقي X (px):</label>
-                <input type="number" id="epc-ve-tx" value="0">
-            </div>
-            <div class="epc-ve-field">
-                <label>تحريك عمودي Y (px):</label>
-                <input type="number" id="epc-ve-ty" value="0">
-            </div>
-        </div>
-        <p style="margin:4px 0 10px 0;font-size:11px;color:#64748b;">💡 يمكنك أيضاً سحب العنصر بالماوس مع الضغط على زر <b>Alt</b> لتحريكه لمكانه الجديد.</p>
-        <div class="epc-ve-field">
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#dc2626;">
-                <input type="checkbox" id="epc-ve-hide"> 👁️ إخفاء هذا العنصر من الصفحة
-            </label>
-        </div>
-
-        <div style="display:flex;gap:8px;margin-top:12px;">
-            <button type="button" id="epc-ve-save" style="flex:1;background:#16a34a;color:#fff;border:none;padding:9px;border-radius:8px;font-weight:700;cursor:pointer;">💾 حفظ التعديل</button>
-            <button type="button" id="epc-ve-reset-item" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;padding:9px 12px;border-radius:8px;font-weight:700;cursor:pointer;" title="إرجاع العنصر لحالته الأصلية">إرجاع</button>
-        </div>
-        <button type="button" id="epc-ve-reset-page" style="width:100%;margin-top:8px;background:#fee2e2;color:#991b1b;border:none;padding:7px;border-radius:8px;font-weight:700;font-size:12px;cursor:pointer;">
-            🔄 استعادة ضبط المصنع لكل عناصر هذه الصفحة
-        </button>
-    </div>
-</div>
-
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-    const savedCustomizations = {$savedJson};
-    const currPagePath = '{$currPath}';
-    const saveUrl = '{$saveUrl}';
-    const resetUrl = '{$resetUrl}';
-    const csrfToken = '{$csrfToken}';
-
-    let editMode = false;
-    let selectedEl = null;
-    let currentSelector = '';
-
-    // توليد مسار فريد ودقيق لأي عنصر في الصفحة أو العناصر المستقبلية
-    function getUniqueSelector(el) {
-        if (!el || el === document.body || el === document.documentElement) return '';
-        if (el.id && !el.id.startsWith('epc-ve-')) {
-            return '#' + CSS.escape(el.id);
-        }
-        const path = [];
-        let curr = el;
-        while (curr && curr !== document.body && curr.nodeType === 1) {
-            let tag = curr.tagName.toLowerCase();
-            if (curr.id && !curr.id.startsWith('epc-ve-')) {
-                path.unshift('#' + CSS.escape(curr.id));
-                break;
-            }
-            let nth = 1;
-            let sib = curr.previousElementSibling;
-            while (sib) {
-                if (sib.tagName === curr.tagName) nth++;
-                sib = sib.previousElementSibling;
-            }
-            path.unshift(tag + ':nth-of-type(' + nth + ')');
-            curr = curr.parentElement;
-        }
-        return path.join(' > ');
-    }
-
-    // تطبيق التعديلات المحفوظة مسبقاً عند فتح الصفحة
-    function applySavedCustomizationToElement(el, data) {
-        if (!el || !data) return;
-        let styles = {};
-        try {
-            styles = typeof data.styles === 'string' ? JSON.parse(data.styles) : (data.styles || {});
-        } catch (e) {}
-
-        if (data.text_content !== null && data.text_content !== undefined && data.text_content !== '') {
-            if (el.children.length === 0) {
-                el.textContent = data.text_content;
-            } else {
-                let updatedText = false;
-                el.childNodes.forEach(node => {
-                    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '' && !updatedText) {
-                        node.textContent = ' ' + data.text_content + ' ';
-                        updatedText = true;
-                    }
-                });
-                if (!updatedText && el.querySelector('span')) {
-                    el.querySelector('span').textContent = data.text_content;
-                }
-            }
-        }
-
-        if (data.placeholder !== null && data.placeholder !== undefined && data.placeholder !== '') {
-            el.setAttribute('placeholder', data.placeholder);
-        }
-
-        if (styles.backgroundColor) el.style.backgroundColor = styles.backgroundColor;
-        if (styles.color) el.style.color = styles.color;
-        if (styles.fontSize) el.style.fontSize = styles.fontSize + 'px';
-        if (styles.borderRadius) el.style.borderRadius = styles.borderRadius + 'px';
-        if (styles.tx || styles.ty) {
-            const x = parseInt(styles.tx || 0, 10);
-            const y = parseInt(styles.ty || 0, 10);
-            el.style.transform = `translate(\${x}px, \${y}px)`;
-            el.dataset.veTx = x;
-            el.dataset.veTy = y;
-        }
-        if (styles.hidden) {
-            el.style.display = 'none';
-        }
-    }
-
-    Object.keys(savedCustomizations).forEach(function (sel) {
-        try {
-            const el = document.querySelector(sel);
-            if (el) applySavedCustomizationToElement(el, savedCustomizations[sel]);
-        } catch (e) {}
-    });
-
-    const toggleBtn = document.getElementById('epc-ve-toggle-btn');
-    const panel = document.getElementById('epc-ve-panel');
-    const closeBtn = document.getElementById('epc-ve-close');
-
-    const inpText = document.getElementById('epc-ve-text');
-    const inpPlaceholder = document.getElementById('epc-ve-placeholder');
-    const wrapPlaceholder = document.getElementById('epc-ve-placeholder-wrap');
-    const inpBg = document.getElementById('epc-ve-bg');
-    const inpColor = document.getElementById('epc-ve-color');
-    const inpFontSize = document.getElementById('epc-ve-fontsize');
-    const inpRadius = document.getElementById('epc-ve-radius');
-    const inpTx = document.getElementById('epc-ve-tx');
-    const inpTy = document.getElementById('epc-ve-ty');
-    const inpHide = document.getElementById('epc-ve-hide');
-
-    function rgbToHex(rgb) {
-        if (!rgb || rgb === 'transparent' || rgb === 'rgba(0, 0, 0, 0)') return '#ffffff';
-        const m = rgb.match(/\d+/g);
-        if (!m || m.length < 3) return '#ffffff';
-        return '#' + m.slice(0, 3).map(x => parseInt(x).toString(16).padStart(2, '0')).join('');
-    }
-
-    function isEditorUi(el) {
-        if (!el) return false;
-        return el.id === 'epc-ve-toggle-btn' || el.closest('#epc-ve-toggle-btn') || el.closest('#epc-ve-panel');
-    }
-
-    toggleBtn.addEventListener('click', function () {
-        editMode = !editMode;
-        if (editMode) {
-            toggleBtn.classList.add('active');
-            toggleBtn.innerHTML = '🎨 <span>وضع التعديل بالماوس: مفعل (اضغط على أي عنصر)</span>';
-        } else {
-            toggleBtn.classList.remove('active');
-            toggleBtn.innerHTML = '🎨 <span>تعديل الواجهة بالماوس: متوقف</span>';
-            panel.style.display = 'none';
-            if (selectedEl) selectedEl.classList.remove('epc-ve-selected');
-            document.querySelectorAll('.epc-ve-hover').forEach(el => el.classList.remove('epc-ve-hover'));
-            selectedEl = null;
-        }
-    });
-
-    closeBtn.addEventListener('click', function () {
-        panel.style.display = 'none';
-        if (selectedEl) selectedEl.classList.remove('epc-ve-selected');
-        selectedEl = null;
-    });
-
-    document.addEventListener('mouseover', function (e) {
-        if (!editMode || isEditorUi(e.target)) return;
-        e.target.classList.add('epc-ve-hover');
-    }, true);
-
-    document.addEventListener('mouseout', function (e) {
-        if (!editMode || isEditorUi(e.target)) return;
-        e.target.classList.remove('epc-ve-hover');
-    }, true);
-
-    // اختيار أي عنصر بالماوس
-    document.addEventListener('click', function (e) {
-        if (!editMode || isEditorUi(e.target)) return;
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (selectedEl) selectedEl.classList.remove('epc-ve-selected');
-        selectedEl = e.target;
-        selectedEl.classList.add('epc-ve-selected');
-        currentSelector = getUniqueSelector(selectedEl);
-
-        const comp = window.getComputedStyle(selectedEl);
-        inpText.value = selectedEl.innerText ? selectedEl.innerText.trim() : '';
-
-        if (selectedEl.tagName === 'INPUT' || selectedEl.tagName === 'TEXTAREA') {
-            wrapPlaceholder.style.display = 'block';
-            inpPlaceholder.value = selectedEl.getAttribute('placeholder') || '';
-        } else {
-            wrapPlaceholder.style.display = 'none';
-            inpPlaceholder.value = '';
-        }
-
-        inpBg.value = rgbToHex(comp.backgroundColor);
-        inpColor.value = rgbToHex(comp.color);
-        inpFontSize.value = parseInt(comp.fontSize, 10) || 14;
-        inpRadius.value = parseInt(comp.borderRadius, 10) || 0;
-        inpTx.value = parseInt(selectedEl.dataset.veTx || 0, 10);
-        inpTy.value = parseInt(selectedEl.dataset.veTy || 0, 10);
-        inpHide.checked = (comp.display === 'none');
-
-        panel.style.display = 'block';
-    }, true);
-
-    // معاينة حية فورية أثناء التغيير
-    function livePreview() {
-        if (!selectedEl) return;
-        if (inpText.value.trim() !== '' && selectedEl.children.length === 0 && selectedEl.tagName !== 'INPUT') {
-            selectedEl.textContent = inpText.value;
-        }
-        if (selectedEl.tagName === 'INPUT' || selectedEl.tagName === 'TEXTAREA') {
-            selectedEl.setAttribute('placeholder', inpPlaceholder.value);
-        }
-        selectedEl.style.backgroundColor = inpBg.value;
-        selectedEl.style.color = inpColor.value;
-        if (inpFontSize.value) selectedEl.style.fontSize = inpFontSize.value + 'px';
-        if (inpRadius.value !== '') selectedEl.style.borderRadius = inpRadius.value + 'px';
-
-        const tx = parseInt(inpTx.value || 0, 10);
-        const ty = parseInt(inpTy.value || 0, 10);
-        selectedEl.style.transform = `translate(\${tx}px, \${ty}px)`;
-        selectedEl.dataset.veTx = tx;
-        selectedEl.dataset.veTy = ty;
-
-        selectedEl.style.display = inpHide.checked ? 'none' : '';
-    }
-
-    [inpText, inpPlaceholder, inpBg, inpColor, inpFontSize, inpRadius, inpTx, inpTy, inpHide].forEach(inp => {
-        inp.addEventListener('input', livePreview);
-        inp.addEventListener('change', livePreview);
-    });
-
-    // سحب العنصر بالماوس مباشرة مع زر Alt
-    let draggingEl = false;
-    let startX = 0, startY = 0, origTx = 0, origTy = 0;
-    document.addEventListener('mousedown', function (e) {
-        if (!editMode || !e.altKey || !selectedEl || isEditorUi(e.target)) return;
-        e.preventDefault();
-        draggingEl = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        origTx = parseInt(selectedEl.dataset.veTx || 0, 10);
-        origTy = parseInt(selectedEl.dataset.veTy || 0, 10);
-    });
-    document.addEventListener('mousemove', function (e) {
-        if (!draggingEl || !selectedEl) return;
-        const nx = origTx + (e.clientX - startX);
-        const ny = origTy + (e.clientY - startY);
-        inpTx.value = nx;
-        inpTy.value = ny;
-        selectedEl.style.transform = `translate(\${nx}px, \${ny}px)`;
-        selectedEl.dataset.veTx = nx;
-        selectedEl.dataset.veTy = ny;
-    });
-    document.addEventListener('mouseup', function () {
-        draggingEl = false;
-    });
-
-    // حفظ التعديل في قاعدة البيانات
-    document.getElementById('epc-ve-save').addEventListener('click', function () {
-        if (!selectedEl || !currentSelector) return;
-        const btn = this;
-        btn.textContent = '⏳ جاري الحفظ...';
-
-        const payload = {
-            page_path: currPagePath,
-            selector: currentSelector,
-            text_content: inpText.value,
-            placeholder: inpPlaceholder.value,
-            styles: {
-                backgroundColor: inpBg.value,
-                color: inpColor.value,
-                fontSize: inpFontSize.value,
-                borderRadius: inpRadius.value,
-                tx: inpTx.value,
-                ty: inpTy.value,
-                hidden: inpHide.checked
-            }
-        };
-
-        fetch(saveUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-TOKEN': csrfToken,
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        })
-        .then(r => r.json())
-        .then(() => {
-            btn.textContent = '✅ تم الحفظ بنجاح!';
-            setTimeout(() => { btn.textContent = '💾 حفظ التعديل'; }, 1200);
-        })
-        .catch(() => {
-            btn.textContent = '💾 حفظ التعديل';
-        });
-    });
-
-    // إرجاع العنصر المحدد لحالته الأصلية
-    document.getElementById('epc-ve-reset-item').addEventListener('click', function () {
-        if (!currentSelector) return;
-        fetch(resetUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-TOKEN': csrfToken,
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify({ page_path: currPagePath, selector: currentSelector })
-        }).then(() => window.location.reload());
-    });
-
-    // استعادة ضبط المصنع لكل الصفحة
-    document.getElementById('epc-ve-reset-page').addEventListener('click', function () {
-        if (!confirm('هل تريد استعادة الشكل الأصلي لجميع عناصر هذه الصفحة؟')) return;
-        fetch(resetUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-TOKEN': csrfToken,
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify({ page_path: currPagePath })
-        }).then(() => window.location.reload());
-    });
-});
-</script>
-HTML;
-
-    if (str_contains($html, '</body>')) {
-        return str_replace('</body>', $editorAssets . "\n</body>", $html);
-    }
-    return $html . $editorAssets;
-}
 
 function injectSidebarNavigationLinks(string $html): string {
     $isAdmin   = auth()->check() && auth()->user()->role === 'admin';
@@ -2654,20 +2481,56 @@ HTML;
 }
 
 /**
- * إزالة قسمي "الأرقام المستثناة (استعلام دائم)" و"استهلاك استعلامات العملاء" من صفحة الرد الآلي (/ai-whatsapp)
- * لأنهم موجودين بشكل كامل ومفصل في صفحة "الاستثناءات والحصص" المستقلة
+ * حقن شريط تفعيل / إيقاف البوت في أعلى صفحة بوت الواتساب (/ai-whatsapp) + إزالة البطاقات المكررة
  */
-function stripDuplicateQuotaCardsFromSecondPage(string $html): string {
-    $cleanupScript = <<<HTML
+function enhanceSecondPageWithBotToggle(string $html, array $botSettings): string {
+    $isEnabled = ($botSettings['bot_enabled'] ?? '1') === '1';
+    $toggleUrl = route('pages.second.toggle_bot');
+    $csrfToken = csrf_token();
+
+    $statusBg    = $isEnabled ? '#f0fdf4' : '#fef2f2';
+    $statusBdr   = $isEnabled ? '#86efac' : '#fca5a5';
+    $badgeBg     = $isEnabled ? '#16a34a' : '#dc2626';
+    $statusText  = $isEnabled ? '🟢 البوت مفعل حالياً (يرد على العملاء آلياً ويسجل في الرادار)' : '🔴 البوت متوقف عن الرد حالياً (يستلم البيانات بصمت ويضيفها لصفحة الأصناف المطلوبة فقط)';
+    $btnBg       = $isEnabled ? '#dc2626' : '#16a34a';
+    $btnLabel    = $isEnabled ? '⏸️ إيقاف الرد الآلي للبوت' : '▶️ تفعيل الرد الآلي للبوت';
+    $nextVal     = $isEnabled ? '0' : '1';
+
+    $bannerHtml = <<<HTML
+    <div id="epc-bot-master-switch" style="background:{$statusBg};border:2px solid {$statusBdr};border-radius:16px;padding:18px 22px;margin-bottom:20px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px;direction:rtl;box-shadow:0 4px 12px rgba(0,0,0,0.03);">
+        <div>
+            <div style="font-size:16px;font-weight:800;color:#0f172a;display:flex;align-items:center;gap:8px;">
+                <span style="background:{$badgeBg};color:#fff;padding:4px 12px;border-radius:999px;font-size:12px;">حالة البوت</span>
+                <span>{$statusText}</span>
+            </div>
+            <p style="margin:6px 0 0 0;font-size:13px;color:#475569;">
+                عند إيقاف البوت لن يرسل أي رسائل للعملاء إطلاقاً، ولكنه سيستمر في استلام الرسائل وملفات الإكسل وحفظها في صفحة "الأصناف المطلوبة".
+            </p>
+        </div>
+        <form method="POST" action="{$toggleUrl}" style="margin:0;">
+            <input type="hidden" name="_token" value="{$csrfToken}">
+            <input type="hidden" name="bot_enabled" value="{$nextVal}">
+            <button type="submit" style="background:{$btnBg};color:#ffffff;border:none;padding:11px 22px;border-radius:10px;font-weight:800;font-size:14px;cursor:pointer;box-shadow:0 4px 10px rgba(0,0,0,0.12);">
+                {$btnLabel}
+            </button>
+        </form>
+    </div>
+HTML;
+
+    $bannerJson = json_encode($bannerHtml, JSON_UNESCAPED_UNICODE);
+
+    $script = <<<HTML
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    // 1. إزالة البلوك عبر البحث عن نماذج الإضافة والتصفير داخل صفحة /ai-whatsapp
-    const duplicateSelectors = [
-        'form[action*="whitelist"]',
-        'form[action*="quotas/reset"]'
-    ];
+    const container = document.querySelector('main') || document.querySelector('[role="main"]') || document.querySelector('.main-content');
+    if (container && !document.getElementById('epc-bot-master-switch')) {
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = {$bannerJson};
+        container.insertBefore(wrapper.firstElementChild, container.firstChild);
+    }
 
-    duplicateSelectors.forEach(function (sel) {
+    // إزالة البطاقات المكررة من أسفل صفحة /ai-whatsapp
+    ['form[action*="whitelist"]', 'form[action*="quotas/reset"]'].forEach(function (sel) {
         document.querySelectorAll(sel).forEach(function (formEl) {
             let card = formEl.closest('.bg-white') || formEl.parentElement;
             if (card) {
@@ -2679,35 +2542,16 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         });
     });
-
-    // 2. تأكيد إضافي عبر البحث عن عناوين البطاقتين وحذف الحاوية الخاصة بهما
-    document.querySelectorAll('h2, h3, h4, div, span').forEach(function (el) {
-        const txt = (el.textContent || '').trim();
-        if (txt === '⭐ الأرقام المستثناة (استعلام دائم)' || txt === 'الأرقام المستثناة (استعلام دائم)' ||
-            txt === '📊 استهلاك استعلامات العملاء' || txt === 'استهلاك استعلامات العملاء') {
-            let box = el.closest('.bg-white') || el.closest('.rounded-xl') || el.closest('.rounded-2xl') || el.closest('.shadow') || el.closest('.shadow-sm');
-            if (box && !box.querySelector('form[action*="ai-whatsapp/settings"]')) {
-                const parentGrid = box.parentElement;
-                box.remove();
-                if (parentGrid && parentGrid.children.length === 0) {
-                    parentGrid.remove();
-                }
-            }
-        }
-    });
 });
 </script>
 HTML;
 
     if (str_contains($html, '</body>')) {
-        return str_replace('</body>', $cleanupScript . "\n</body>", $html);
+        return str_replace('</body>', $script . "\n</body>", $html);
     }
-    return $html . $cleanupScript;
+    return $html . $script;
 }
 
-/**
- * استبدال محتوى منطقة العمل الرئيسية داخل القالب الأساسي لإنشاء صفحة مستقلة نظيفة تماماً بدون "صفحة فوق صفحة"
- */
 function renderStandalonePageInsideMainLayout(string $pageTitle, string $innerHtmlContent): string {
     $baseHtml = view('pages.second', [
         'customerMessage' => '',
@@ -2745,7 +2589,6 @@ document.addEventListener('DOMContentLoaded', function () {
         container.innerHTML = customHtml;
         container.style.opacity = '1';
 
-        // تشغيل جميع أكواد الـ Script الموجودة داخل الصفحة المستقلة لتعمل نافذة السجل والفلترة الحية
         container.querySelectorAll('script').forEach(function (oldScript) {
             const newScript = document.createElement('script');
             Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
@@ -2767,14 +2610,10 @@ HTML;
     return $baseHtml . $replaceScript;
 }
 
-/**
- * حقن البحث المباشر بدون إنتر + الفلاتر السريعة + روابط القائمة الجانبية في صفحة المخزون
- */
 function injectInventoryLiveSearchAndFiltersScript(string $html): string {
     $currentFilter = request()->query('stock_filter', 'all');
 
     $injectedAssets = <<<HTML
-<!-- EPC Live Search & Smart Stock Filters -->
 <style>
     .epc-stock-filters-bar {
         display: flex;
@@ -2928,7 +2767,7 @@ HTML;
 
 /*
 |--------------------------------------------------------------------------
-| 7. المسارات العامة ومسارات المصادقة (Public & Auth Routes)
+| 7. المسارات العامة ومسارات المصادقة وتحميل ملف إكسل الواتساب
 |--------------------------------------------------------------------------
 */
 
@@ -2939,6 +2778,18 @@ Route::get('/', function () {
 Route::get('/dashboard', function () {
     return redirect()->route('inventory.index');
 })->middleware(['auth', 'verified'])->name('dashboard');
+
+// مسار عام لتحميل ملف إكسل التسعير المرسل للعميل في الواتساب
+Route::get('/whatsapp-exports/{file}', function (string $file) {
+    $safeFile = basename($file);
+    $path = storage_path('app/public/whatsapp_exports/' . $safeFile);
+    if (!file_exists($path)) {
+        abort(404);
+    }
+    return response()->download($path, 'نتيجة_التسعير.xlsx', [
+        'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ]);
+})->name('public.whatsapp.excel.download');
 
 Route::post('/api/webhook/receiver', function (Request $r) {
     return handleWebhook($r);
@@ -3457,7 +3308,7 @@ Route::middleware('auth')->group(function () {
         return response(injectSidebarNavigationLinks($rendered));
     })->name('master.catalog');
 
-    // 4. صفحة تفاصيل الرقم الموحد
+    // 4. صفحة تفاصيل الرقم الموحد + مسارات الكلمات المفتاحية (حل خطأ Route [master.item.keyword.add] not defined)
     Route::get('/master-catalog/{itemNumber}', function ($itemNumber) {
         if (auth()->user()->role !== 'admin') abort(403);
 
@@ -3474,13 +3325,36 @@ Route::middleware('auth')->group(function () {
             ->where('items.item_number', $cleanNumber)
             ->get();
 
-        $keywords = collect();
+        $keywords = Schema::hasTable('master_item_keywords')
+            ? DB::table('master_item_keywords')->where('item_number', $cleanNumber)->latest()->get()
+            : collect();
 
         $rendered = view('pages.master_details', compact('itemNumber', 'master', 'clientHoldings', 'keywords'))->render();
         return response(injectSidebarNavigationLinks($rendered));
     })->name('master.item.details');
 
-    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) - نظيفة تماماً وبدون البطاقتين المكررتين في الأسفل
+    Route::post('/master-catalog/{itemNumber}/keywords', function (Request $request, $itemNumber) {
+        if (auth()->user()->role !== 'admin') abort(403);
+        $cleanNumber = strtoupper(trim($itemNumber));
+        $keyword     = trim((string) $request->input('keyword', ''));
+        if ($keyword !== '') {
+            DB::table('master_item_keywords')->insert([
+                'item_number' => $cleanNumber,
+                'keyword'     => $keyword,
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ]);
+        }
+        return back()->with('success', 'تمت إضافة الكلمة المفتاحية للصنف بنجاح.');
+    })->name('master.item.keyword.add');
+
+    Route::delete('/master-catalog/keywords/{id}', function ($id) {
+        if (auth()->user()->role !== 'admin') abort(403);
+        DB::table('master_item_keywords')->where('id', $id)->delete();
+        return back()->with('success', 'تم حذف الكلمة المفتاحية.');
+    })->name('master.item.keyword.delete');
+
+    // 5. صفحة الرد الآلي عبر الواتساب (/ai-whatsapp) مع زر تشغيل/إيقاف البوت
     Route::get('/ai-whatsapp', function (Request $request) {
         $userId          = auth()->id();
         $customerMessage = (string) $request->query('message', '');
@@ -3503,7 +3377,6 @@ Route::middleware('auth')->group(function () {
                     })
                     ->get();
 
-                // تسجيل تجربة التسعير في الرادار أيضاً ليظهر للأدمن فوراً
                 foreach ($extractedWithQty as $reqItem) {
                     $pNum = $reqItem['part_number'];
                     $rQty = max(1, (int) ($reqItem['requested_qty'] ?? 1));
@@ -3525,11 +3398,28 @@ Route::middleware('auth')->group(function () {
             'customerQuotas'  => collect(),
         ])->render();
 
-        $rendered = stripDuplicateQuotaCardsFromSecondPage($rendered);
+        $rendered = enhanceSecondPageWithBotToggle($rendered, $botSettings);
         return response(injectSidebarNavigationLinks($rendered));
     })->name('pages.second');
 
-    // 6. صفحة مستقلة تماماً: إدارة الاستثناءات المتقدمة والتصفير التلقائي والقائمة السوداء (/whatsapp-quotas)
+    // مسار زر تفعيل / إيقاف الرد الآلي للبوت
+    Route::post('/ai-whatsapp/toggle-bot', function (Request $request) {
+        $userId = auth()->id();
+        $newState = $request->input('bot_enabled', '1') === '1' ? '1' : '0';
+
+        DB::table('user_bot_settings')->updateOrInsert(
+            ['user_id' => $userId, 'key' => 'bot_enabled'],
+            ['value' => $newState]
+        );
+
+        $msg = $newState === '1'
+            ? 'تم تفعيل الرد الآلي للبوت بنجاح.'
+            : 'تم إيقاف الرد الآلي للبوت (سيستمر النظام في استلام البيانات وتسجيلها في صفحة الأصناف المطلوبة دون الرد على العملاء).';
+
+        return back()->with('success', $msg);
+    })->name('pages.second.toggle_bot');
+
+    // 6. صفحة إدارة الاستثناءات المتقدمة والتصفير التلقائي (شاملة التعديل + يومي/أسبوعي/شهري)
     Route::get('/whatsapp-quotas', function () {
         $userId      = auth()->id();
         $botSettings = getUserBotSettings($userId);
@@ -3556,12 +3446,27 @@ Route::middleware('auth')->group(function () {
 
         $selManual  = $resetPeriod === 'manual' ? 'selected' : '';
         $selDaily   = $resetPeriod === 'daily' ? 'selected' : '';
+        $selWeekly  = $resetPeriod === 'weekly' ? 'selected' : '';
         $selMonthly = $resetPeriod === 'monthly' ? 'selected' : '';
 
+        $periodLabels = [
+            'default' => 'حسب الإعداد العام',
+            'manual'  => 'يدوي فقط',
+            'daily'   => '🔄 تجديد يومي',
+            'weekly'  => '📅 تجديد أسبوعي',
+            'monthly' => '🗓️ تجديد شهري',
+        ];
+
         $whitelistRowsHtml = '';
+        $whitelistJsData   = [];
+
         foreach ($whitelistPhones as $w) {
-            $quotaBadge = (!empty($w->custom_quota) && (int) $w->custom_quota > 0)
-                ? "<span style='background:#eff6ff;color:#1e40af;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>محدد ({$w->custom_quota} رقم)</span>"
+            $cQuotaVal = (int) ($w->custom_quota ?? 0);
+            $rPeriod   = $w->reset_period ?? 'default';
+            $rLabel    = $periodLabels[$rPeriod] ?? 'حسب الإعداد العام';
+
+            $quotaBadge = ($cQuotaVal > 0)
+                ? "<span style='background:#eff6ff;color:#1e40af;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>محدد ({$cQuotaVal} رقم) — {$rLabel}</span>"
                 : "<span style='background:#f0fdf4;color:#166534;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;'>مفتوح بلا حد</span>";
 
             $timeWindow = (!empty($w->allowed_start_time) && !empty($w->allowed_end_time))
@@ -3579,6 +3484,21 @@ Route::middleware('auth')->group(function () {
             $delUrl    = route('pages.second.whitelist.delete', $w->id);
             $labelSafe = htmlspecialchars((string) ($w->label ?? 'بدون اسم'), ENT_QUOTES, 'UTF-8');
 
+            $whitelistJsData[$w->id] = [
+                'id'                 => $w->id,
+                'phone'              => $w->phone,
+                'label'              => (string) ($w->label ?? ''),
+                'custom_quota'       => $cQuotaVal,
+                'reset_period'       => $rPeriod,
+                'allowed_start_time' => (string) ($w->allowed_start_time ?? ''),
+                'allowed_end_time'   => (string) ($w->allowed_end_time ?? ''),
+                'allow_available'    => (bool) ($w->allow_available ?? true),
+                'allow_unavailable'  => (bool) ($w->allow_unavailable ?? true),
+                'allow_prices'       => (bool) ($w->allow_prices ?? true),
+                'allow_quantities'   => (bool) ($w->allow_quantities ?? true),
+                'allow_excel'        => (bool) ($w->allow_excel ?? true),
+            ];
+
             $whitelistRowsHtml .= "
             <tr style='border-bottom:1px solid #f1f5f9;transition:background 0.15s;' onmouseover=\"this.style.background='#f8fafc'\" onmouseout=\"this.style.background='transparent'\">
                 <td style='padding:14px;font-weight:700;font-family:monospace;font-size:14px;color:#0f172a;'>{$w->phone}</td>
@@ -3586,11 +3506,12 @@ Route::middleware('auth')->group(function () {
                 <td style='padding:14px;'>{$quotaBadge}</td>
                 <td style='padding:14px;font-size:13px;color:#475569;'>{$timeWindow}</td>
                 <td style='padding:14px;font-size:12px;color:#475569;'>{$permsStr}</td>
-                <td style='padding:14px;'>
-                    <form method='POST' action='{$delUrl}' style='display:inline;'>
+                <td style='padding:14px;display:flex;gap:6px;align-items:center;'>
+                    <button type='button' class='epc-edit-wl-btn' data-id='{$w->id}' style='background:#dbeafe;color:#1e40af;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>✏️ تعديل</button>
+                    <form method='POST' action='{$delUrl}' style='display:inline;margin:0;' onsubmit=\"return confirm('هل تريد حذف هذا الرقم من الاستثناء؟');\">
                         <input type='hidden' name='_token' value='{$csrfToken}'>
                         <input type='hidden' name='_method' value='DELETE'>
-                        <button type='submit' style='background:#fee2e2;color:#991b1b;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>حذف</button>
+                        <button type='submit' style='background:#fee2e2;color:#991b1b;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;'>🗑️ حذف</button>
                     </form>
                 </td>
             </tr>";
@@ -3645,18 +3566,18 @@ Route::middleware('auth')->group(function () {
         $settingsActionUrl  = route('pages.second.settings');
         $whitelistActionUrl = route('pages.second.whitelist.add');
         $blacklistActionUrl = route('pages.second.blacklist.add');
+        $wlJson             = json_encode($whitelistJsData, JSON_UNESCAPED_UNICODE);
 
         $contentHtml = <<<HTML
         <div style="padding:28px;max-width:1300px;margin:0 auto;direction:rtl;font-family:inherit;background:#f8fafc;min-height:100vh;">
-            <!-- رأس الصفحة -->
             <div style="background:linear-gradient(135deg, #0f172a 0%, #1e293b 100%);color:#fff;padding:24px 28px;border-radius:16px;margin-bottom:24px;box-shadow:0 4px 12px rgba(15,23,42,0.08);">
                 <h1 style="margin:0;font-size:22px;font-weight:800;display:flex;align-items:center;gap:10px;">🛡️ إدارة الاستثناءات والحصص والتصفير التلقائي</h1>
-                <p style="margin:8px 0 0 0;font-size:13px;color:#94a3b8;line-height:1.5;">تحكم احترافي في الحد العام للاستعلامات، دورات التصفير التلقائي، الصلاحيات المخصصة للأرقام، وإدارة القائمة السوداء.</p>
+                <p style="margin:8px 0 0 0;font-size:13px;color:#94a3b8;line-height:1.5;">تحكم احترافي في الحد العام للاستعلامات، دورات التصفير التلقائي (يومي / أسبوعي / شهري)، وتعديل صلاحيات الأرقام المستثناة.</p>
             </div>
 
             <!-- 1. التصفير التلقائي والحد العام -->
             <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
-                <h3 style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:8px;">🔄 نظام الحصة العام والتصفير التلقائي</h3>
+                <h3 style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;">🔄 نظام الحصة العام والتصفير التلقائي</h3>
                 <p style="margin:0 0 18px 0;font-size:13px;color:#64748b;">كل رقم صنف يتم الاستعلام عنه يُحتسب كاستعلام واحد مستقل.</p>
                 
                 <form method="POST" action="{$settingsActionUrl}" style="display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end;">
@@ -3669,56 +3590,73 @@ Route::middleware('auth')->group(function () {
                         <label style="display:block;font-size:13px;font-weight:700;color:#334155;margin-bottom:6px;">دورة التصفير التلقائي لعداد الاستعلامات:</label>
                         <select name="quota_reset_period" style="width:100%;padding:10px 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;background:#f8fafc;">
                             <option value="manual" {$selManual}>يدوي فقط (من زر تصفير العداد)</option>
-                            <option value="daily" {$selDaily}>تلقائي يومياً (كل 24 ساعة)</option>
-                            <option value="monthly" {$selMonthly}>تلقائي بداية كل شهر</option>
+                            <option value="daily" {$selDaily}>تلقائي يومياً (يتجدد كل يوم)</option>
+                            <option value="weekly" {$selWeekly}>تلقائي أسبوعياً (يتجدد كل 7 أيام)</option>
+                            <option value="monthly" {$selMonthly}>تلقائي شهرياً (يتجدد بداية كل شهر)</option>
                         </select>
                     </div>
-                    <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:11px 24px;border-radius:10px;font-weight:700;cursor:pointer;font-size:14px;box-shadow:0 2px 6px rgba(37,99,235,0.2);">
+                    <button type="submit" style="background:#2563eb;color:#ffffff;border:none;padding:11px 24px;border-radius:10px;font-weight:700;cursor:pointer;font-size:14px;">
                         💾 حفظ الإعدادات
                     </button>
                 </form>
             </div>
 
-            <!-- 2. نظام الاستثناءات المتقدم -->
+            <!-- 2. نظام الاستثناءات المتقدم (إضافة + تعديل) -->
             <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
-                <h3 style="margin:0 0 16px 0;font-size:16px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:8px;">🌟 إضافة رقم لقائمة الاستثناء المتقدمة</h3>
+                <h3 id="epc-wl-form-title" style="margin:0 0 16px 0;font-size:16px;font-weight:700;color:#0f172a;">🌟 إضافة / تعديل رقم في قائمة الاستثناء المتقدمة</h3>
                 
-                <form method="POST" action="{$whitelistActionUrl}" style="background:#f8fafc;padding:20px;border-radius:14px;border:1px solid #e2e8f0;margin-bottom:20px;">
+                <form id="epc-wl-form" method="POST" action="{$whitelistActionUrl}" style="background:#f8fafc;padding:20px;border-radius:14px;border:1px solid #e2e8f0;margin-bottom:20px;">
                     <input type="hidden" name="_token" value="{$csrfToken}">
-                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-bottom:18px;">
+                    <input type="hidden" name="whitelist_id" id="epc-wl-id" value="">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">
                         <div>
                             <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">رقم الجوال *</label>
-                            <input type="text" name="phone" required placeholder="05XXXXXXXX" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                            <input type="text" name="phone" id="epc-wl-phone" required placeholder="05XXXXXXXX" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
                             <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">اسم العميل / الوصف</label>
-                            <input type="text" name="label" placeholder="مثال: ورشة النخبة" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                            <input type="text" name="label" id="epc-wl-label" placeholder="مثال: ورشة النخبة" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">عدد مرات الاستعلام (0 = مفتوح)</label>
-                            <input type="number" name="custom_quota" min="0" value="0" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">عدد الأرقام المسموحة (0 = مفتوح)</label>
+                            <input type="number" name="custom_quota" id="epc-wl-quota" min="0" value="0" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">دورة التصفير لهذا الرقم</label>
+                            <select name="reset_period" id="epc-wl-reset" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;font-size:13px;">
+                                <option value="daily">🔄 يومي (يتجدد كل يوم)</option>
+                                <option value="weekly">📅 أسبوعي (يتجدد كل أسبوع)</option>
+                                <option value="monthly">🗓️ شهري (يتجدد كل شهر)</option>
+                                <option value="manual">✋ يدوي فقط</option>
+                                <option value="default">⚙️ حسب الإعداد العام</option>
+                            </select>
                         </div>
                         <div>
                             <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">من الساعة (اختياري)</label>
-                            <input type="time" name="allowed_start_time" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                            <input type="time" name="allowed_start_time" id="epc-wl-start" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                         <div>
                             <label style="display:block;font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">إلى الساعة (اختياري)</label>
-                            <input type="time" name="allowed_end_time" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
+                            <input type="time" name="allowed_end_time" id="epc-wl-end" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;">
                         </div>
                     </div>
 
-                    <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center;padding-top:14px;border-top:1px dashed #cbd5e1;">
+                    <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding-top:14px;border-top:1px dashed #cbd5e1;">
                         <span style="font-size:13px;font-weight:700;color:#1e293b;">صلاحيات الرد المسموحة:</span>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_available" value="1" checked> ✅ المتوفر</label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_unavailable" value="1" checked> ❌ غير المتوفر</label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_prices" value="1" checked> 💰 الأسعار</label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_quantities" value="1" checked> 📦 الكميات</label>
-                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_excel" value="1" checked> 📊 ملفات إكسل</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_available" id="epc-wl-avail" value="1" checked> ✅ المتوفر</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_unavailable" id="epc-wl-unavail" value="1" checked> ❌ غير المتوفر</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_prices" id="epc-wl-prices" value="1" checked> 💰 الأسعار</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_quantities" id="epc-wl-qty" value="1" checked> 📦 الكميات</label>
+                        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" name="allow_excel" id="epc-wl-excel" value="1" checked> 📊 ملفات إكسل</label>
                         
-                        <button type="submit" style="margin-right:auto;background:#16a34a;color:#fff;border:none;padding:11px 24px;border-radius:10px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(22,163,74,0.2);">
-                            + حفظ الرقم المستثنى
-                        </button>
+                        <div style="margin-right:auto;display:flex;gap:8px;">
+                            <button type="button" id="epc-wl-cancel-edit" style="display:none;background:#e2e8f0;color:#334155;border:none;padding:11px 18px;border-radius:10px;font-weight:700;cursor:pointer;">
+                                إلغاء التعديل
+                            </button>
+                            <button type="submit" id="epc-wl-submit-btn" style="background:#16a34a;color:#fff;border:none;padding:11px 24px;border-radius:10px;font-weight:700;cursor:pointer;">
+                                + حفظ الرقم المستثنى
+                            </button>
+                        </div>
                     </div>
                 </form>
 
@@ -3728,10 +3666,10 @@ Route::middleware('auth')->group(function () {
                             <tr style="background:#f1f5f9;color:#334155;">
                                 <th style="padding:14px;">رقم الجوال</th>
                                 <th style="padding:14px;">الاسم / الوصف</th>
-                                <th style="padding:14px;">حد الاستعلام</th>
+                                <th style="padding:14px;">حد الاستعلام ودورة التجديد</th>
                                 <th style="padding:14px;">الأوقات المسموحة</th>
                                 <th style="padding:14px;">الصلاحيات المفعلة</th>
-                                <th style="padding:14px;">إجراء</th>
+                                <th style="padding:14px;">إجراءات</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -3742,8 +3680,8 @@ Route::middleware('auth')->group(function () {
             </div>
 
             <!-- 3. القائمة السوداء (Blacklist) -->
-            <div style="background:#ffffff;border:1px solid #fee2e2;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
-                <h3 style="margin:0 0 14px 0;font-size:16px;font-weight:700;color:#991b1b;display:flex;align-items:center;gap:8px;">🚫 القائمة السوداء (حظر الأرقام)</h3>
+            <div style="background:#ffffff;border:1px solid #fee2e2;border-radius:16px;padding:24px;margin-bottom:24px;">
+                <h3 style="margin:0 0 14px 0;font-size:16px;font-weight:700;color:#991b1b;">🚫 القائمة السوداء (حظر الأرقام)</h3>
                 <form method="POST" action="{$blacklistActionUrl}" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
                     <input type="hidden" name="_token" value="{$csrfToken}">
                     <input type="text" name="phone" required placeholder="رقم الجوال (05XXXXXXXX)" style="flex:1;min-width:220px;padding:10px 14px;border:1px solid #fca5a5;border-radius:10px;background:#fff;">
@@ -3770,7 +3708,7 @@ Route::middleware('auth')->group(function () {
             </div>
 
             <!-- 4. سجل عداد الاستعلامات الحالي للعملاء -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,0.02);">
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
                     <h3 style="margin:0;font-size:16px;font-weight:700;color:#0f172a;">📊 عداد استهلاك الأرقام وحصص العملاء</h3>
                     <form method="POST" action="{$resetUrl}" onsubmit="return confirm('هل تريد تصفير العداد لجميع الأرقام؟');">
@@ -3797,13 +3735,80 @@ Route::middleware('auth')->group(function () {
                 </div>
             </div>
         </div>
+
+        <script>
+        (function () {
+            const wlData = {$wlJson};
+            const formTitle  = document.getElementById('epc-wl-form-title');
+            const submitBtn  = document.getElementById('epc-wl-submit-btn');
+            const cancelBtn  = document.getElementById('epc-wl-cancel-edit');
+            const inpId      = document.getElementById('epc-wl-id');
+            const inpPhone   = document.getElementById('epc-wl-phone');
+            const inpLabel   = document.getElementById('epc-wl-label');
+            const inpQuota   = document.getElementById('epc-wl-quota');
+            const inpReset   = document.getElementById('epc-wl-reset');
+            const inpStart   = document.getElementById('epc-wl-start');
+            const inpEnd     = document.getElementById('epc-wl-end');
+            const chkAvail   = document.getElementById('epc-wl-avail');
+            const chkUnavail = document.getElementById('epc-wl-unavail');
+            const chkPrices  = document.getElementById('epc-wl-prices');
+            const chkQty     = document.getElementById('epc-wl-qty');
+            const chkExcel   = document.getElementById('epc-wl-excel');
+
+            document.querySelectorAll('.epc-edit-wl-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    const id = this.getAttribute('data-id');
+                    const item = wlData[id];
+                    if (!item) return;
+
+                    inpId.value    = item.id;
+                    inpPhone.value = item.phone;
+                    inpLabel.value = item.label;
+                    inpQuota.value = item.custom_quota;
+                    inpReset.value = item.reset_period || 'daily';
+                    inpStart.value = item.allowed_start_time;
+                    inpEnd.value   = item.allowed_end_time;
+
+                    chkAvail.checked   = !!item.allow_available;
+                    chkUnavail.checked = !!item.allow_unavailable;
+                    chkPrices.checked  = !!item.allow_prices;
+                    chkQty.checked     = !!item.allow_quantities;
+                    chkExcel.checked   = !!item.allow_excel;
+
+                    formTitle.innerHTML = '✏️ تعديل صلاحيات وحدود الرقم المستثنى: <span style="color:#2563eb;font-family:monospace;">' + item.phone + '</span>';
+                    submitBtn.textContent = '💾 حفظ التعديلات على الرقم';
+                    submitBtn.style.background = '#2563eb';
+                    cancelBtn.style.display = 'inline-block';
+
+                    document.getElementById('epc-wl-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                });
+            });
+
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', function () {
+                    inpId.value    = '';
+                    inpPhone.value = '';
+                    inpLabel.value = '';
+                    inpQuota.value = 0;
+                    inpReset.value = 'daily';
+                    inpStart.value = '';
+                    inpEnd.value   = '';
+                    chkAvail.checked = chkUnavail.checked = chkPrices.checked = chkQty.checked = chkExcel.checked = true;
+
+                    formTitle.textContent = '🌟 إضافة / تعديل رقم في قائمة الاستثناء المتقدمة';
+                    submitBtn.textContent = '+ حفظ الرقم المستثنى';
+                    submitBtn.style.background = '#16a34a';
+                    cancelBtn.style.display = 'none';
+                });
+            }
+        })();
+        </script>
 HTML;
 
         return response(renderStandalonePageInsideMainLayout('إدارة الاستثناءات والحصص', $contentHtml));
     })->name('whatsapp.quotas.page');
 
-    // 7. صفحة مستقلة تماماً خاصة بالأدمن فقط: رادار الطلبات العام الموحد (/admin-radar)
-    // حذف صنف محدد من سجل الرادار
+    // 7. صفحة رادار الطلبات العام الموحد (/admin-radar)
     Route::delete('/admin-radar/item/{normKey}', function (string $normKey) {
         if (auth()->user()->role !== 'admin') {
             abort(403);
@@ -3818,7 +3823,6 @@ HTML;
         return back()->with('success', "تم حذف الصنف ({$cleanKey}) من سجل الأصناف المطلوبة بنجاح.");
     })->name('admin.radar.delete_item');
 
-    // 7. صفحة مستقلة تماماً خاصة بالأدمن فقط: رادار الطلبات العام الموحد (/admin-radar)
     Route::get('/admin-radar', function (Request $request) {
         if (auth()->user()->role !== 'admin') {
             abort(403);
@@ -3876,7 +3880,6 @@ HTML;
 
             $groupedRadar[$normKey]['total_req_qty'] += max(1, (int) $log->requested_qty);
 
-            // حفظ جميع مرات الطلب بالكامل للتصدير التفصيلي وعرض السجل
             $groupedRadar[$normKey]['details_list'][] = [
                 'date'      => (string) $log->created_at,
                 'day'       => $dayStr,
@@ -3890,7 +3893,6 @@ HTML;
             ];
         }
 
-        // ترتيب افتراضي حسب الأكثر طلباً باليوم ثم التكرار
         $itemsList = array_values($groupedRadar);
         usort($itemsList, function ($a, $b) {
             $daysA = count($a['unique_days_map']);
@@ -4020,22 +4022,20 @@ HTML;
         $clearLogsUrl = route('pages.second.logs.clear');
 
         $contentHtml = <<<HTML
-        <!-- مكتبة SheetJS لتوليد ملفات إكسل حقيقية .xlsx بأعمدة منفصلة -->
         <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
         <div style="padding:28px;max-width:1400px;margin:0 auto;direction:rtl;background:#f8fafc;min-height:100vh;">
-            <!-- الهيدر العلوي العصري -->
             <div style="background:linear-gradient(135deg, #0f172a 0%, #1e293b 100%);color:#ffffff;padding:24px 28px;border-radius:18px;margin-bottom:22px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;box-shadow:0 8px 20px rgba(15,23,42,0.08);">
                 <div>
                     <h1 style="margin:0;font-size:24px;font-weight:800;display:flex;align-items:center;gap:10px;">
                         📡 رادار الأصناف المطلوبة والنواقص
                     </h1>
                     <p style="margin:6px 0 0 0;font-size:13px;color:#cbd5e1;">
-                        يجمع كافة الأرقام التي تم تسعيرها أو طلبها من جميع العملاء تلقائياً مع إحصائيات الكميات والتكرار
+                        يجمع كافة الأرقام التي تم تسعيرها أو طلبها من جميع العملاء تلقائياً (حتى أثناء إيقاف الرد الآلي للبوت)
                     </p>
                 </div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-                    <button type="button" id="epc-open-export-modal-btn" style="background:#16a34a;color:#ffffff;border:none;padding:10px 18px;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 10px rgba(22,163,74,0.25);">
+                    <button type="button" id="epc-open-export-modal-btn" style="background:#16a34a;color:#ffffff;border:none;padding:10px 18px;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:6px;">
                         📊 تصدير إلى Excel (.xlsx)
                     </button>
                     <form method="POST" action="{$clearLogsUrl}" onsubmit="return confirm('هل أنت متأكد من تصفير ومسح سجل الرادار بالكامل؟');" style="margin:0;">
@@ -4047,9 +4047,8 @@ HTML;
                 </div>
             </div>
 
-            <!-- بطاقات الإحصائيات السريعة المريحة للعين -->
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-bottom:22px;">
-                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <div style="font-size:13px;color:#64748b;font-weight:700;">إجمالي الأصناف المعروضة</div>
                         <div id="epc-stat-visible-count" style="font-size:24px;font-weight:800;color:#0f172a;margin-top:4px;">{$totalUniqueParts}</div>
@@ -4057,7 +4056,7 @@ HTML;
                     <div style="background:#eff6ff;color:#2563eb;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">📦</div>
                 </div>
 
-                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <div style="font-size:13px;color:#64748b;font-weight:700;">أصناف غير متوفرة (نواقص)</div>
                         <div style="font-size:24px;font-weight:800;color:#dc2626;margin-top:4px;">{$totalMissingParts}</div>
@@ -4065,7 +4064,7 @@ HTML;
                     <div style="background:#fef2f2;color:#dc2626;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">❌</div>
                 </div>
 
-                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <div style="font-size:13px;color:#64748b;font-weight:700;">أصناف متوفرة بالكامل</div>
                         <div style="font-size:24px;font-weight:800;color:#16a34a;margin-top:4px;">{$totalAvailParts}</div>
@@ -4073,7 +4072,7 @@ HTML;
                     <div style="background:#f0fdf4;color:#16a34a;width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">✅</div>
                 </div>
 
-                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <div style="font-size:13px;color:#64748b;font-weight:700;">إجمالي الكمية المطلوبة</div>
                         <div style="font-size:24px;font-weight:800;color:#b45309;margin-top:4px;">{$totalRequestedUnits} <span style="font-size:13px;font-weight:600;">حبة</span></div>
@@ -4082,10 +4081,9 @@ HTML;
                 </div>
             </div>
 
-            <!-- شريط البحث الفوري الحي + الفلترة + الترتيب الذكي المتعدد -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:18px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,0.02);">
-                <div style="flex:1;min-width:260px;position:relative;">
-                    <input type="text" id="epc-radar-live-search" placeholder="🔍 بحث فوري حي برقم الصنف (مع شرطة أو بدون) أو اسم القطعة..." style="width:100%;padding:11px 16px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;background:#f8fafc;">
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:18px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;">
+                <div style="flex:1;min-width:260px;">
+                    <input type="text" id="epc-radar-live-search" placeholder="🔍 بحث فوري حي برقم الصنف أو اسم القطعة..." style="width:100%;padding:11px 16px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;background:#f8fafc;">
                 </div>
 
                 <select id="epc-radar-status-filter" style="padding:11px 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:13px;font-weight:700;background:#f8fafc;color:#1e293b;cursor:pointer;">
@@ -4108,8 +4106,7 @@ HTML;
                 </button>
             </div>
 
-            <!-- جدول الرادار الموحد -->
-            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.03);">
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;">
                 <div style="overflow-x:auto;">
                     <table id="epc-radar-table" style="width:100%;border-collapse:collapse;font-size:13px;text-align:right;">
                         <thead>
@@ -4132,40 +4129,27 @@ HTML;
             </div>
         </div>
 
-        <!-- نافذة اختيار نوع تصدير الإكسل (.xlsx) -->
         <div id="epc-export-choice-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
-            <div style="background:#ffffff;width:100%;max-width:540px;border-radius:18px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.35);">
+            <div style="background:#ffffff;width:100%;max-width:540px;border-radius:18px;overflow:hidden;">
                 <div style="background:#0f172a;color:#ffffff;padding:18px 22px;display:flex;justify-content:space-between;align-items:center;">
                     <h3 style="margin:0;font-size:17px;font-weight:800;">📊 اختر نوع التصدير إلى ملف Excel (.xlsx)</h3>
                     <button type="button" id="epc-close-export-modal-btn" style="background:transparent;color:#cbd5e1;border:none;font-size:18px;cursor:pointer;font-weight:800;">✕</button>
                 </div>
                 <div style="padding:22px;">
-                    <p style="margin:0 0 16px 0;font-size:13px;color:#475569;">
-                        سيتم تصدير <b>الأصناف المفلترة والظاهرة حالياً في الجدول فقط</b> بصيغة Excel حقيقية (`.xlsx`) بحيث يكون كل عمود في عمود منفصل تماماً:
-                    </p>
-
                     <div style="display:flex;flex-direction:column;gap:12px;">
-                        <button type="button" id="epc-do-export-normal" style="text-align:right;background:#f0fdf4;border:2px solid #86efac;border-radius:14px;padding:16px;cursor:pointer;transition:all 0.15s;">
+                        <button type="button" id="epc-do-export-normal" style="text-align:right;background:#f0fdf4;border:2px solid #86efac;border-radius:14px;padding:16px;cursor:pointer;">
                             <div style="font-size:15px;font-weight:800;color:#166534;margin-bottom:4px;">1️⃣ تصدير عادي (.xlsx) — ملخص الجدول بدون تكرار</div>
-                            <div style="font-size:12px;color:#15803d;line-height:1.5;">
-                                العمود A: رقم الصنف | العمود B: اسم الصنف | العمود C: حالة التوفر | العمود D: إجمالي الكمية المطلوبة | العمود E: مرات الطلب (يومي) | العمود F: مرات الطلب (مكرر) | العمود G: تاريخ آخر طلب.
-                            </div>
                         </button>
-
-                        <button type="button" id="epc-do-export-detailed" style="text-align:right;background:#eff6ff;border:2px solid #93c5fd;border-radius:14px;padding:16px;cursor:pointer;transition:all 0.15s;">
+                        <button type="button" id="epc-do-export-detailed" style="text-align:right;background:#eff6ff;border:2px solid #93c5fd;border-radius:14px;padding:16px;cursor:pointer;">
                             <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:4px;">2️⃣ تصدير تفصيلي (.xlsx) — شامل تكرار جميع الطلبات</div>
-                            <div style="font-size:12px;color:#1d4ed8;line-height:1.5;">
-                                إذا تكرر طلب الصنف 100 مرة يظهر 100 سطر منفصل (العمود A: رقم الصنف | العمود B: اسم الصنف | العمود C: الحالة | العمود D: الكمية المطلوبة | العمود E: الكمية المتوفرة | العمود F: السعر | العمود G: جوال العميل | العمود H: التاجر | العمود I: المصدر | العمود J: التاريخ والوقت) بدون إجمالي الكمية ومرات الطلب اليومي.
-                            </div>
                         </button>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- نافذة عرض السجل التفصيلي بالتواريخ لكل رقم صنف -->
         <div id="epc-radar-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:20px;direction:rtl;">
-            <div style="background:#ffffff;width:100%;max-width:980px;border-radius:18px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.35);">
+            <div style="background:#ffffff;width:100%;max-width:980px;border-radius:18px;overflow:hidden;">
                 <div style="background:#0f172a;color:#ffffff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <h3 id="epc-modal-title" style="margin:0;font-size:18px;font-weight:800;">السجل التفصيلي للصنف</h3>
@@ -4210,7 +4194,6 @@ HTML;
             const closeModal       = document.getElementById('epc-close-modal-btn');
             const visibleCount     = document.getElementById('epc-stat-visible-count');
 
-            // 1. فتح نافذة السجل التفصيلي
             function openDetailsModal(partKey) {
                 const data = radarDetailsData[partKey];
                 if (!data) return;
@@ -4227,17 +4210,12 @@ HTML;
                         ? "<span style='background:#dcfce7;color:#166534;padding:3px 8px;border-radius:6px;font-weight:700;font-size:12px;'>✅ متوفر</span>"
                         : "<span style='background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:6px;font-weight:700;font-size:12px;'>❌ غير متوفر</span>";
 
-                    const cleanDigits = (rec.customer || '').replace(/\\D/g, '');
-                    const waLink = cleanDigits.length >= 9
-                        ? `<a href="https://wa.me/\${cleanDigits}" target="_blank" style="color:#16a34a;text-decoration:none;font-weight:800;margin-right:6px;" title="مراسلة عبر واتساب">💬</a>`
-                        : '';
-
                     const tr = document.createElement('tr');
                     tr.style.borderBottom = '1px solid #f1f5f9';
                     tr.innerHTML = `
                         <td style="padding:10px;font-weight:700;">\${idx + 1}</td>
                         <td style="padding:10px;direction:ltr;font-family:monospace;">\${rec.date}</td>
-                        <td style="padding:10px;font-weight:700;font-family:monospace;">\${rec.customer} \${waLink}</td>
+                        <td style="padding:10px;font-weight:700;font-family:monospace;">\${rec.customer}</td>
                         <td style="padding:10px;">\${rec.merchant}</td>
                         <td style="padding:10px;">\${stBadge}</td>
                         <td style="padding:10px;">مطلوب: <b>\${rec.req_qty}</b> | متوفر: <b>\${rec.avail_qty}</b></td>
@@ -4256,21 +4234,13 @@ HTML;
                     e.preventDefault();
                     openDetailsModal(logBtn.getAttribute('data-part-key'));
                 }
-                if (e.target === modal) {
-                    modal.style.display = 'none';
-                }
-                if (e.target === exportModal) {
-                    exportModal.style.display = 'none';
-                }
+                if (e.target === modal) modal.style.display = 'none';
+                if (e.target === exportModal) exportModal.style.display = 'none';
             });
 
-            if (closeModal) {
-                closeModal.addEventListener('click', function () {
-                    modal.style.display = 'none';
-                });
-            }
+            if (closeModal) closeModal.addEventListener('click', () => modal.style.display = 'none');
+            if (closeExportBtn) closeExportBtn.addEventListener('click', () => exportModal.style.display = 'none');
 
-            // 2. البحث الفوري الحي + الفلترة + الترتيب الذكي المتعدد
             function applyLiveFilterAndSort() {
                 if (!tbody) return;
                 const rawQuery   = (searchInput.value || '').trim().toLowerCase();
@@ -4310,21 +4280,11 @@ HTML;
                         const d = parseInt(b.dataset.days, 10) - parseInt(a.dataset.days, 10);
                         return d !== 0 ? d : parseInt(b.dataset.detailed, 10) - parseInt(a.dataset.detailed, 10);
                     }
-                    if (sortVal === 'detailed_desc') {
-                        return parseInt(b.dataset.detailed, 10) - parseInt(a.dataset.detailed, 10);
-                    }
-                    if (sortVal === 'qty_desc') {
-                        return parseInt(b.dataset.qty, 10) - parseInt(a.dataset.qty, 10);
-                    }
-                    if (sortVal === 'unavail_desc') {
-                        return parseInt(b.dataset.unavail, 10) - parseInt(a.dataset.unavail, 10);
-                    }
-                    if (sortVal === 'date_desc') {
-                        return (b.dataset.date || '').localeCompare(a.dataset.date || '');
-                    }
-                    if (sortVal === 'date_asc') {
-                        return (a.dataset.date || '').localeCompare(b.dataset.date || '');
-                    }
+                    if (sortVal === 'detailed_desc') return parseInt(b.dataset.detailed, 10) - parseInt(a.dataset.detailed, 10);
+                    if (sortVal === 'qty_desc') return parseInt(b.dataset.qty, 10) - parseInt(a.dataset.qty, 10);
+                    if (sortVal === 'unavail_desc') return parseInt(b.dataset.unavail, 10) - parseInt(a.dataset.unavail, 10);
+                    if (sortVal === 'date_desc') return (b.dataset.date || '').localeCompare(a.dataset.date || '');
+                    if (sortVal === 'date_asc') return (a.dataset.date || '').localeCompare(b.dataset.date || '');
                     return 0;
                 });
 
@@ -4345,62 +4305,30 @@ HTML;
                 });
             }
 
-            // 3. دالة توليد وتحميل ملف إكسل حقيقي (.xlsx) بأعمدة منفصلة واتجاه عربي RTL
             function downloadRealExcelXlsx(aoaData, colWidths, sheetTitle, filePrefix) {
                 const fileName = filePrefix + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
-
                 if (typeof XLSX !== 'undefined') {
                     const wb = XLSX.utils.book_new();
                     const ws = XLSX.utils.aoa_to_sheet(aoaData);
-
                     ws['!cols'] = colWidths.map(w => ({ wch: w }));
-                    if (! wb.Workbook) wb.Workbook = {};
-                    if (! wb.Workbook.Views) wb.Workbook.Views = [{}];
+                    if (!wb.Workbook) wb.Workbook = {};
+                    if (!wb.Workbook.Views) wb.Workbook.Views = [{}];
                     wb.Workbook.Views[0].RTL = true;
-
                     XLSX.utils.book_append_sheet(wb, ws, sheetTitle);
                     XLSX.writeFile(wb, fileName);
-                    return;
                 }
-
-                // بديل احتياطي في حال عدم اتصال الإنترنت لتحميل مكتبة SheetJS
-                alert('يرجى التأكد من اتصال الإنترنت لتحميل مكتبة تصدير XLSX.');
             }
 
             if (openExportBtn) {
                 openExportBtn.addEventListener('click', function () {
-                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
-                        .filter(r => r.style.display !== 'none');
-                    if (visibleRows.length === 0) {
-                        alert('لا توجد أصناف ظاهرة حالياً لتصديرها.');
-                        return;
-                    }
                     exportModal.style.display = 'flex';
                 });
             }
 
-            if (closeExportBtn) {
-                closeExportBtn.addEventListener('click', function () {
-                    exportModal.style.display = 'none';
-                });
-            }
-
-            // أ) تصدير عادي (.xlsx): كل عمود في عمود منفصل كما هو ظاهر في الجدول وبدون تكرار للأصناف المفلترة
             if (btnExportNormal) {
                 btnExportNormal.addEventListener('click', function () {
-                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
-                        .filter(r => r.style.display !== 'none');
-
-                    const aoa = [[
-                        'رقم الصنف',
-                        'اسم الصنف',
-                        'حالة التوفر',
-                        'إجمالي الكمية المطلوبة',
-                        'مرات الطلب (يومي)',
-                        'مرات الطلب (مكرر)',
-                        'تاريخ آخر طلب'
-                    ]];
-
+                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row')).filter(r => r.style.display !== 'none');
+                    const aoa = [['رقم الصنف', 'اسم الصنف', 'حالة التوفر', 'إجمالي الكمية المطلوبة', 'مرات الطلب (يومي)', 'مرات الطلب (مكرر)', 'تاريخ آخر طلب']];
                     visibleRows.forEach(function (r) {
                         aoa.push([
                             String(r.getAttribute('data-part') || ''),
@@ -4412,47 +4340,24 @@ HTML;
                             String(r.getAttribute('data-date') || '')
                         ]);
                     });
-
                     exportModal.style.display = 'none';
-                    downloadRealExcelXlsx(
-                        aoa,
-                        [22, 35, 26, 22, 18, 18, 22],
-                        'ملخص الأصناف المطلوبة',
-                        'radar_summary_export'
-                    );
+                    downloadRealExcelXlsx(aoa, [22, 35, 26, 22, 18, 18, 22], 'ملخص الأصناف المطلوبة', 'radar_summary_export');
                 });
             }
 
-            // ب) تصدير تفصيلي (.xlsx): كل عملية طلب في سطر مستقل وبأعمدة منفصلة (بدون إجمالي الكمية ومرات الطلب اليومي)
             if (btnExportDetail) {
                 btnExportDetail.addEventListener('click', function () {
-                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row'))
-                        .filter(r => r.style.display !== 'none');
-
-                    const aoa = [[
-                        'رقم الصنف',
-                        'اسم الصنف',
-                        'الحالة وقت الطلب',
-                        'الكمية المطلوبة',
-                        'الكمية المتوفرة',
-                        'السعر',
-                        'رقم جوال العميل',
-                        'المتجر / التاجر',
-                        'المصدر',
-                        'التاريخ والوقت'
-                    ]];
-
+                    const visibleRows = Array.from(tbody.querySelectorAll('.epc-radar-row')).filter(r => r.style.display !== 'none');
+                    const aoa = [['رقم الصنف', 'اسم الصنف', 'الحالة وقت الطلب', 'الكمية المطلوبة', 'الكمية المتوفرة', 'السعر', 'رقم جوال العميل', 'المتجر / التاجر', 'المصدر', 'التاريخ والوقت']];
                     visibleRows.forEach(function (r) {
                         const partKey = r.getAttribute('data-part-key') || '';
                         const itemObj = radarDetailsData[partKey];
                         if (!itemObj || !Array.isArray(itemObj.records)) return;
-
                         itemObj.records.forEach(function (rec) {
-                            const statusAr = rec.status === 'available' ? 'متوفر' : 'غير متوفر';
                             aoa.push([
                                 String(itemObj.part_number || ''),
                                 String(itemObj.item_name || ''),
-                                statusAr,
+                                rec.status === 'available' ? 'متوفر' : 'غير متوفر',
                                 Number(rec.req_qty || 1),
                                 Number(rec.avail_qty || 0),
                                 String(rec.price || '—'),
@@ -4463,14 +4368,8 @@ HTML;
                             ]);
                         });
                     });
-
                     exportModal.style.display = 'none';
-                    downloadRealExcelXlsx(
-                        aoa,
-                        [22, 35, 18, 16, 16, 14, 20, 22, 16, 22],
-                        'التقرير التفصيلي للطلبات',
-                        'radar_detailed_export'
-                    );
+                    downloadRealExcelXlsx(aoa, [22, 35, 18, 16, 16, 14, 20, 22, 16, 22], 'التقرير التفصيلي للطلبات', 'radar_detailed_export');
                 });
             }
         })();
@@ -4484,6 +4383,7 @@ HTML;
     Route::post('/ai-whatsapp/settings', function (Request $request) {
         $userId = auth()->id();
         $fields = [
+            'bot_enabled',
             'reply_available',
             'reply_unavailable',
             'reply_quota_exceeded',
@@ -4518,11 +4418,12 @@ HTML;
         return back()->with('success', 'تم حفظ الإعدادات بنجاح.');
     })->name('pages.second.settings');
 
-    // إضافة أو تحديث رقم في قائمة الاستثناء المتقدمة
+    // إضافة أو تعديل رقم في قائمة الاستثناء المتقدمة (مع دورة التصفير يومي / أسبوعي / شهري)
     Route::post('/ai-whatsapp/whitelist', function (Request $request) {
-        $userId   = auth()->id();
-        $rawPhone = trim((string) $request->input('phone', ''));
-        $label    = trim((string) $request->input('label', ''));
+        $userId      = auth()->id();
+        $whitelistId = $request->input('whitelist_id');
+        $rawPhone    = trim((string) $request->input('phone', ''));
+        $label       = trim((string) $request->input('label', ''));
 
         $normalized = normalizeWhatsappDigits($rawPhone);
         if ($normalized === '') {
@@ -4530,35 +4431,48 @@ HTML;
         }
 
         $customQuota = (int) $request->input('custom_quota', 0);
+        $resetPeriod = in_array($request->input('reset_period'), ['daily', 'weekly', 'monthly', 'manual', 'default'], true)
+            ? $request->input('reset_period')
+            : 'daily';
         $startTime   = trim((string) $request->input('allowed_start_time', '')) ?: null;
         $endTime     = trim((string) $request->input('allowed_end_time', '')) ?: null;
 
-        $hasAdvancedFlags = $request->hasAny(['allow_available', 'allow_unavailable', 'allow_prices', 'allow_quantities', 'allow_excel', 'custom_quota']);
+        $allowAvailable   = $request->boolean('allow_available');
+        $allowUnavailable = $request->boolean('allow_unavailable');
+        $allowPrices      = $request->boolean('allow_prices');
+        $allowQuantities  = $request->boolean('allow_quantities');
+        $allowExcel       = $request->boolean('allow_excel');
 
-        $allowAvailable   = $hasAdvancedFlags ? $request->boolean('allow_available') : true;
-        $allowUnavailable = $hasAdvancedFlags ? $request->boolean('allow_unavailable') : true;
-        $allowPrices      = $hasAdvancedFlags ? $request->boolean('allow_prices') : true;
-        $allowQuantities  = $hasAdvancedFlags ? $request->boolean('allow_quantities') : true;
-        $allowExcel       = $hasAdvancedFlags ? $request->boolean('allow_excel') : true;
+        $payloadData = [
+            'phone'              => $normalized,
+            'label'              => $label,
+            'custom_quota'       => $customQuota > 0 ? $customQuota : null,
+            'reset_period'       => $resetPeriod,
+            'allowed_start_time' => $startTime,
+            'allowed_end_time'   => $endTime,
+            'allow_available'    => $allowAvailable,
+            'allow_unavailable'  => $allowUnavailable,
+            'allow_prices'       => $allowPrices,
+            'allow_quantities'   => $allowQuantities,
+            'allow_excel'        => $allowExcel,
+            'updated_at'         => now(),
+        ];
 
+        if (!empty($whitelistId)) {
+            DB::table('whatsapp_whitelist_phones')
+                ->where('id', (int) $whitelistId)
+                ->where('user_id', $userId)
+                ->update($payloadData);
+            return back()->with('success', "تم تحديث صلاحيات وحدود الرقم ({$normalized}) بنجاح.");
+        }
+
+        $payloadData['created_at'] = now();
         DB::table('whatsapp_whitelist_phones')->updateOrInsert(
             ['user_id' => $userId, 'phone' => $normalized],
-            [
-                'label'              => $label,
-                'custom_quota'       => $customQuota > 0 ? $customQuota : null,
-                'allowed_start_time' => $startTime,
-                'allowed_end_time'   => $endTime,
-                'allow_available'    => $allowAvailable,
-                'allow_unavailable'  => $allowUnavailable,
-                'allow_prices'       => $allowPrices,
-                'allow_quantities'   => $allowQuantities,
-                'allow_excel'        => $allowExcel,
-                'updated_at'         => now(),
-                'created_at'         => now(),
-            ]
+            $payloadData
         );
 
-        return back()->with('success', "تم حفظ الرقم ({$normalized}) في قائمة الاستثناء مع صلاحياته المخصصة بنجاح.");
+        return back()->with('success', "تم حفظ الرقم ({$normalized}) في قائمة الاستثناء مع صلاحياته ودورة التصفير المخصصة بنجاح.");
     })->name('pages.second.whitelist.add');
 
     Route::delete('/ai-whatsapp/whitelist/{id}', function ($id) {
@@ -4596,7 +4510,6 @@ HTML;
         return back()->with('success', 'تم إلغاء حظر الرقم من القائمة السوداء.');
     })->name('pages.second.blacklist.delete');
 
-    // مسح سجل الرادار (للأدمن يمسح الرادار العام، وللمستخدم يمسح سجله)
     Route::post('/ai-whatsapp/logs/clear', function () {
         if (auth()->user()->role === 'admin') {
             DB::table('whatsapp_inquiry_logs')->delete();
