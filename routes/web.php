@@ -3500,7 +3500,7 @@ Route::middleware('auth')->group(function () {
             $delUrl    = route('pages.second.whitelist.delete', $w->id);
             $labelSafe = htmlspecialchars((string) ($w->label ?? 'بدون اسم'), ENT_QUOTES, 'UTF-8');
 
-            $whitelistRowsHtml += "
+            $whitelistRowsHtml .= "
             <tr style='border-bottom:1px solid #f1f5f9;transition:background 0.15s;' onmouseover=\"this.style.background='#f8fafc'\" onmouseout=\"this.style.background='transparent'\">
                 <td style='padding:14px;font-weight:700;font-family:monospace;font-size:14px;color:#0f172a;'>{$w->phone}</td>
                 <td style='padding:14px;font-weight:600;color:#334155;'>{$labelSafe}</td>
