@@ -6,21 +6,21 @@
 <div class="space-y-6">
 
     @if(session('success'))
-        <div class="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl font-bold text-sm shadow-sm flex items-center gap-2">
+        <div class="ledger-alert-success flex items-center gap-2">
             <span>✅</span>
             <span>{{ session('success') }}</span>
         </div>
     @endif
 
     @if($errors->any())
-        <div class="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl font-bold text-sm shadow-sm flex items-center gap-2">
+        <div class="ledger-alert-danger flex items-center gap-2">
             <span>❌</span>
             <span>يرجى اختيار ملف قاعدة بيانات صالح بصيغة (.sqlite).</span>
         </div>
     @endif
 
     <!-- إعدادات رابط الويب هوك -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+    <div class="ledger-panel ledger-panel-padding">
         <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">
             <span>⚙️</span>
             <span>رابط الويب هوك (Webhook)</span>
@@ -48,7 +48,7 @@
     </div>
 
     <!-- النسخ الاحتياطي واستعادة البيانات -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+    <div class="ledger-panel ledger-panel-padding flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
             <h3 class="font-bold text-slate-800 flex items-center gap-2">
                 <span>💾</span>
@@ -79,15 +79,15 @@
     </div>
 
     <!-- سجلات الويب هوك -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+    <div class="ledger-panel ledger-panel-padding space-y-4">
         <h3 class="font-bold text-slate-800 flex items-center gap-2">
             <span>📋</span>
             <span>سجل العمليات الواردة (Webhook Logs)</span>
         </h3>
 
         @if(isset($webhookLogs) && $webhookLogs->count() > 0)
-            <div class="overflow-x-auto">
-                <table class="w-full text-right border-collapse text-sm">
+            <div class="ledger-table-wrap">
+                <table class="ledger-table">
                     <thead>
                         <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 text-xs">
                             <th class="py-3 px-4 font-semibold">نوع الحدث</th>

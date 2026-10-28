@@ -6,12 +6,11 @@
 <div class="space-y-6">
 
     <!-- كرت إضافة عميل -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+    <div class="ledger-panel ledger-panel-padding">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
             <div>
-                <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">
-                    <span>👥</span>
-                    <span>إدارة العملاء</span>
+                <h2 class="ledger-page-title">
+                        <span>إدارة العملاء</span>
                 </h2>
                 <p class="text-sm text-slate-500 mt-1">
                     تسجيل بيانات العملاء وتوليد كود التحقق السريع (OTP) لتسجيل الدخول عبر الواتساب.
@@ -53,7 +52,7 @@
     </div>
 
     <!-- جدول بيانات العملاء -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+    <div class="ledger-panel ledger-panel-padding space-y-4">
         <div class="flex items-center justify-between">
             <h3 class="font-bold text-slate-800">قائمة العملاء</h3>
             <span class="text-xs bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1 rounded-full font-semibold">
@@ -61,8 +60,8 @@
             </span>
         </div>
 
-        <div class="overflow-x-auto">
-            <table class="w-full text-right border-collapse text-sm">
+        <div class="ledger-table-wrap">
+            <table class="ledger-table">
                 <thead>
                     <tr class="bg-slate-50 border-b border-slate-200 text-slate-600">
                         <th class="py-3 px-4 font-semibold">العميل</th>

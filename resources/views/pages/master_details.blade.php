@@ -6,10 +6,9 @@
 <div class="space-y-6">
 
     <!-- شريط الرأس -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-wrap items-center justify-between gap-4">
+    <div class="ledger-panel ledger-panel-padding flex flex-wrap items-center justify-between gap-4">
         <div>
-            <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">
-                <span>🔍</span>
+            <h2 class="ledger-page-title">
                 <span>الصنف: <span class="text-emerald-700 font-mono">{{ $itemNumber }}</span></span>
             </h2>
             <p class="text-sm text-slate-500 mt-1">
@@ -31,13 +30,13 @@
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         
         <!-- تواجد الصنف لدى العملاء -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+        <div class="ledger-panel ledger-panel-padding space-y-4">
             <h3 class="font-bold text-slate-800 border-b border-slate-100 pb-3 flex items-center gap-2">
                 <span>📦</span>
                 <span>توفر الصنف لدى العملاء</span>
             </h3>
-            <div class="overflow-x-auto">
-                <table class="w-full text-right border-collapse text-sm">
+            <div class="ledger-table-wrap">
+                <table class="ledger-table">
                     <thead>
                         <tr class="bg-slate-50 border-b border-slate-200 text-slate-600">
                             <th class="py-2.5 px-3 font-semibold">العميل</th>
@@ -69,7 +68,7 @@
         </div>
 
         <!-- الكلمات المفتاحية -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+        <div class="ledger-panel ledger-panel-padding space-y-4">
             <h3 class="font-bold text-slate-800 border-b border-slate-100 pb-3 flex items-center gap-2">
                 <span>🔑</span>
                 <span>الكلمات المفتاحية (للبحث والرد الآلي)</span>

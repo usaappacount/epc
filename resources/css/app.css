@@ -1,3 +1,780 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+    --ledger-primary: #059669;
+    --ledger-primary-hover: #047857;
+    --ledger-primary-active: #065f46;
+    --ledger-primary-soft: #ecfdf5;
+    --ledger-primary-border: #a7f3d0;
+    --ledger-navigation: #0f172a;
+    --ledger-bg: #f1f5f9;
+    --ledger-surface: #ffffff;
+    --ledger-text: #1e293b;
+    --ledger-muted: #64748b;
+    --ledger-border: #e2e8f0;
+    --ledger-border-strong: #cbd5e1;
+    --ledger-info: #4f46e5;
+    --ledger-info-hover: #4338ca;
+    --ledger-info-soft: #eef2ff;
+    --ledger-info-border: #c7d2fe;
+    --ledger-warning: #d97706;
+    --ledger-warning-hover: #b45309;
+    --ledger-warning-soft: #fffbeb;
+    --ledger-warning-border: #fde68a;
+    --ledger-danger: #e11d48;
+    --ledger-danger-hover: #be123c;
+    --ledger-danger-soft: #fff1f2;
+    --ledger-danger-border: #fecdd3;
+    --ledger-success: #059669;
+    --ledger-success-hover: #047857;
+    --ledger-success-soft: #ecfdf5;
+    --ledger-success-border: #a7f3d0;
+    --ledger-control-height: 42px;
+    --ledger-control-radius: 8px;
+    --ledger-icon-size: 40px;
+}
+
+html {
+    direction: rtl;
+    scroll-behavior: smooth;
+}
+
+body {
+    font-family: 'Cairo', Figtree, sans-serif;
+    color: var(--ledger-text);
+    background: var(--ledger-bg);
+    -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+    color: #064e3b;
+    background: #a7f3d0;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f8fafc;
+}
+
+::-webkit-scrollbar-thumb {
+    border: 2px solid #f8fafc;
+    border-radius: 999px;
+    background: #cbd5e1;
+}
+
+input, select, textarea, button {
+    font: inherit;
+}
+
+input, select, textarea {
+    caret-color: var(--ledger-primary);
+}
+
+:focus-visible {
+    outline: 3px solid rgba(5, 150, 105, 0.24);
+    outline-offset: 2px;
+}
+
+@layer components {
+    .ledger-shell {
+        @apply min-h-screen;
+        background:
+            radial-gradient(circle at 100% 0%, rgba(5, 150, 105, 0.035), transparent 28rem),
+            var(--ledger-bg);
+    }
+
+    .ledger-sidebar {
+        @apply flex min-h-screen w-64 shrink-0 flex-col bg-slate-900 text-white;
+        box-shadow: -1px 0 0 rgba(15, 23, 42, 0.08);
+    }
+
+    .ledger-brand {
+        @apply flex items-center gap-3 border-b border-slate-800 px-5 py-5;
+    }
+
+    .ledger-brand-mark {
+        @apply flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-400/20 bg-emerald-500/10 text-emerald-400;
+    }
+
+    .ledger-nav-link {
+        @apply flex items-center gap-3 rounded-lg px-3.5 py-3 text-sm font-semibold text-slate-300 transition-colors duration-150;
+    }
+
+    .ledger-nav-link:hover {
+        @apply bg-slate-800 text-white;
+    }
+
+    .ledger-nav-link-active {
+        @apply bg-emerald-600 text-white;
+        box-shadow: 0 8px 20px rgba(5, 150, 105, 0.16);
+    }
+
+    .ledger-main {
+        @apply min-w-0 flex-1 px-4 py-5 sm:px-6 sm:py-6 lg:px-8 lg:py-8;
+        overflow-y: auto;
+    }
+
+    .ledger-panel {
+        @apply rounded-xl border border-slate-200 bg-white;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+    }
+
+    .ledger-panel-padding {
+        @apply p-4 sm:p-5 lg:p-6;
+    }
+
+    .ledger-page-title {
+        @apply text-xl font-bold text-slate-800 sm:text-2xl;
+        line-height: 1.3;
+    }
+
+    .ledger-section-title {
+        @apply text-base font-bold text-slate-800;
+        line-height: 1.35;
+    }
+
+    .ledger-input {
+        @apply w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-800 placeholder:text-slate-400;
+        @apply focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-600/10;
+        min-height: 42px;
+    }
+
+    .ledger-button {
+        @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors duration-150;
+    }
+
+    .ledger-button-primary {
+        @apply ledger-button bg-emerald-600 text-white hover:bg-emerald-700 active:bg-emerald-800;
+        box-shadow: 0 1px 2px rgba(6, 95, 70, 0.12);
+        background-color: var(--ledger-primary) !important;
+        color: #fff !important;
+        border: 1px solid var(--ledger-primary) !important;
+        min-width: 40px;
+    }
+
+    .ledger-button-primary:hover {
+        background-color: var(--ledger-primary-hover) !important;
+        border-color: var(--ledger-primary-hover) !important;
+    }
+
+    .ledger-button-secondary {
+        @apply ledger-button border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 active:bg-slate-100;
+        background-color: #fff !important;
+        color: var(--ledger-text) !important;
+        border: 1px solid var(--ledger-border-strong) !important;
+    }
+
+    .ledger-button-secondary:hover {
+        background-color: #f8fafc !important;
+        border-color: #94a3b8 !important;
+    }
+
+    .ledger-button-danger {
+        @apply ledger-button border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 active:bg-rose-200;
+        background-color: var(--ledger-danger-soft) !important;
+        color: var(--ledger-danger-hover) !important;
+        border: 1px solid var(--ledger-danger-border) !important;
+    }
+
+    .ledger-button-danger:hover {
+        background-color: #ffe4e6 !important;
+        border-color: #fda4af !important;
+    }
+
+    .ledger-button-dark {
+        @apply ledger-button bg-slate-800 text-white hover:bg-slate-900 active:bg-slate-950;
+    }
+
+    .ledger-button-outline {
+        @apply ledger-button;
+        background-color: transparent !important;
+        color: var(--ledger-text) !important;
+        border: 1px solid var(--ledger-border-strong) !important;
+    }
+
+    .ledger-button-outline:hover {
+        background-color: #f8fafc !important;
+        border-color: #94a3b8 !important;
+    }
+
+    .ledger-button-success {
+        @apply ledger-button;
+        background-color: var(--ledger-success) !important;
+        color: #fff !important;
+        border: 1px solid var(--ledger-success) !important;
+    }
+
+    .ledger-button-success:hover {
+        background-color: var(--ledger-success-hover) !important;
+        border-color: var(--ledger-success-hover) !important;
+    }
+
+    .ledger-button-icon {
+        @apply ledger-button !px-0;
+        width: var(--ledger-icon-size);
+        min-width: var(--ledger-icon-size);
+        height: var(--ledger-icon-size);
+        padding-inline: 0 !important;
+    }
+
+    .ledger-alert {
+        @apply rounded-xl border px-4 py-3 text-sm font-semibold;
+    }
+
+    .ledger-alert-success {
+        @apply ledger-alert border-emerald-200 bg-emerald-50 text-emerald-800;
+    }
+
+    .ledger-alert-danger {
+        @apply ledger-alert border-rose-200 bg-rose-50 text-rose-800;
+    }
+
+    .ledger-table-wrap {
+        @apply w-full overflow-x-auto;
+        border-radius: 0 0 0.75rem 0.75rem;
+    }
+
+    .ledger-table {
+        @apply w-full border-collapse text-right text-sm;
+        min-width: 720px;
+    }
+
+    .ledger-table thead tr {
+        @apply border-b border-slate-200 bg-slate-50 text-slate-600;
+    }
+
+    .ledger-table th {
+        @apply whitespace-nowrap px-4 py-3 font-bold;
+        font-size: 12px;
+    }
+
+    .ledger-table tbody tr {
+        @apply border-b border-slate-100 transition-colors duration-150;
+    }
+
+    .ledger-table tbody tr:last-child {
+        @apply border-b-0;
+    }
+
+    .ledger-table tbody tr:hover {
+        background: #f8fafc;
+    }
+
+    .ledger-table td {
+        @apply px-4 py-3;
+        vertical-align: middle;
+    }
+
+    .ledger-status {
+        @apply inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold;
+    }
+
+    .ledger-status-success {
+        @apply ledger-status border-emerald-200 bg-emerald-100 text-emerald-800;
+    }
+
+    .ledger-status-warning {
+        @apply ledger-status border-amber-200 bg-amber-50 text-amber-800;
+    }
+
+    .ledger-status-danger {
+        @apply ledger-status border-rose-200 bg-rose-50 text-rose-800;
+    }
+
+    .ledger-modal {
+        box-shadow: 0 24px 64px rgba(15, 23, 42, 0.22);
+    }
+}
+
+@media (max-width: 767px) {
+    .ledger-main {
+        @apply p-3;
+    }
+}
+
+/* Shared ledger overrides for the application-wide legacy utility surfaces. */
+@layer components {
+    body {
+        min-width: 320px;
+    }
+
+    .ledger-main > section,
+    .ledger-main > div > section {
+        width: 100%;
+    }
+
+    .ledger-main form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+    .ledger-main form select,
+    .ledger-main form textarea,
+    .ledger-main input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+    .ledger-main textarea,
+    .ledger-main select {
+        border-radius: 8px !important;
+        border-color: #cbd5e1 !important;
+        background-color: #fff !important;
+        box-shadow: 0 1px 1px rgba(15, 23, 42, 0.02) !important;
+    }
+
+    .ledger-main form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
+    .ledger-main form select:focus,
+    .ledger-main form textarea:focus {
+        border-color: var(--ledger-primary) !important;
+        box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.10) !important;
+    }
+
+    .ledger-main table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+    }
+
+    .ledger-main table thead tr {
+        background: #f8fafc;
+    }
+
+    .ledger-main table th {
+        padding: 12px 16px !important;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .ledger-main table td {
+        padding: 12px 16px !important;
+        vertical-align: middle;
+    }
+
+    .ledger-main table tbody tr {
+        transition: background-color 150ms ease;
+    }
+
+    .ledger-main table tbody tr:hover {
+        background: #f8fafc;
+    }
+
+    .ledger-main .bg-white.rounded-xl.shadow-sm.border.border-slate-200,
+    .ledger-main .ledger-panel {
+        border-radius: 12px !important;
+        border-color: var(--ledger-border) !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 4px 12px rgba(15, 23, 42, 0.025) !important;
+    }
+
+    .ledger-main a[class*="bg-emerald-600"],
+    .ledger-main button[class*="bg-emerald-600"],
+    .ledger-main button[class*="bg-slate-800"],
+    .ledger-main a[class*="bg-indigo-600"] {
+        min-height: 40px;
+        border-radius: 8px !important;
+        font-weight: 700 !important;
+        transition: background-color 150ms ease, border-color 150ms ease, transform 150ms ease !important;
+    }
+
+    .ledger-main a[class*="bg-emerald-600"]:hover,
+    .ledger-main button[class*="bg-emerald-600"]:hover,
+    .ledger-main a[class*="bg-indigo-600"]:hover {
+        transform: translateY(-1px);
+    }
+
+    .ledger-main input::placeholder,
+    .ledger-main textarea::placeholder {
+        color: #94a3b8;
+        opacity: 1;
+    }
+}
+
+.auth-shell {
+    min-height: 100vh;
+    direction: rtl;
+    background:
+        linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.88)),
+        var(--ledger-bg);
+}
+
+.auth-shell-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 460px);
+    min-height: 100vh;
+}
+
+.auth-story {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: clamp(32px, 6vw, 72px);
+    color: white;
+}
+
+.auth-card {
+    align-self: center;
+    width: calc(100% - 48px);
+    max-width: 460px;
+    margin-inline-start: 48px;
+    border-radius: 16px;
+    border: 1px solid rgba(226, 232, 240, 0.8);
+    background: white;
+    padding: clamp(24px, 4vw, 40px);
+    box-shadow: 0 24px 64px rgba(15, 23, 42, 0.22);
+}
+
+@media (max-width: 767px) {
+    .auth-shell-grid {
+        grid-template-columns: 1fr;
+        align-items: center;
+        padding: 16px;
+    }
+
+    .auth-story {
+        display: none;
+    }
+
+    .auth-card {
+        width: 100%;
+        max-width: 440px;
+        margin: 0 auto;
+        padding: 24px;
+    }
+}
+
+/* Operational Ledger: application-wide page composition and data-density rules */
+.ledger-main {
+    max-width: 1480px;
+    margin-inline: auto;
+}
+
+.ledger-main > .space-y-6 > .ledger-panel:first-child {
+    position: relative;
+    overflow: hidden;
+}
+
+.ledger-main > .space-y-6 > .ledger-panel:first-child::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--ledger-primary);
+}
+
+.ledger-main .ledger-panel {
+    border-color: #dfe5ec !important;
+    background: rgba(255, 255, 255, 0.98);
+}
+
+.ledger-main table {
+    font-variant-numeric: tabular-nums;
+}
+
+.ledger-main table thead {
+    position: relative;
+    z-index: 1;
+}
+
+.ledger-main table thead tr {
+    box-shadow: inset 0 -1px 0 #e2e8f0;
+}
+
+.ledger-main table tbody tr {
+    border-bottom: 1px solid #eef2f7;
+}
+
+.ledger-main table tbody tr:last-child {
+    border-bottom: 0;
+}
+
+.ledger-main table td,
+.ledger-main table th {
+    line-height: 1.55;
+}
+
+.ledger-main .overflow-x-auto {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 #f8fafc;
+}
+
+/* Unified interactive tokens across dashboard, Breeze, authentication, and legacy views */
+.ledger-main button,
+.ledger-main a[class*="bg-"],
+.ledger-main label[class*="cursor-pointer"],
+.auth-shell button,
+.auth-shell input,
+.auth-shell select,
+.auth-shell textarea {
+    border-radius: var(--ledger-control-radius);
+}
+
+.ledger-main button,
+.ledger-main a[class*="bg-"],
+.ledger-main label[class*="cursor-pointer"] {
+    min-height: var(--ledger-control-height);
+    font-size: 0.875rem;
+    line-height: 1.25;
+    font-weight: 700;
+}
+
+.ledger-main button svg,
+.ledger-main a[class*="bg-"] svg,
+.ledger-main label[class*="cursor-pointer"] svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+
+.ledger-main button:disabled,
+.ledger-main button[aria-disabled="true"],
+.ledger-main a[aria-disabled="true"],
+.ledger-main input:disabled,
+.ledger-main select:disabled,
+.ledger-main textarea:disabled,
+.auth-shell button:disabled,
+.auth-shell input:disabled {
+    cursor: not-allowed !important;
+    opacity: 0.58 !important;
+    transform: none !important;
+}
+
+.ledger-main button:focus-visible,
+.ledger-main a:focus-visible,
+.ledger-main label[class*="cursor-pointer"]:focus-within,
+.auth-shell button:focus-visible,
+.auth-shell a:focus-visible,
+.auth-shell input:focus-visible {
+    outline: 3px solid rgba(5, 150, 105, 0.22) !important;
+    outline-offset: 2px;
+}
+
+.ledger-main button[class*="bg-emerald-600"],
+.ledger-main a[class*="bg-emerald-600"] {
+    background-color: var(--ledger-primary) !important;
+    border-color: var(--ledger-primary) !important;
+    color: #fff !important;
+}
+
+.ledger-main button[class*="bg-emerald-600"]:hover,
+.ledger-main a[class*="bg-emerald-600"]:hover {
+    background-color: var(--ledger-primary-hover) !important;
+    border-color: var(--ledger-primary-hover) !important;
+}
+
+.ledger-main button[class*="bg-indigo-600"],
+.ledger-main a[class*="bg-indigo-600"] {
+    background-color: var(--ledger-info) !important;
+    border-color: var(--ledger-info) !important;
+    color: #fff !important;
+}
+
+.ledger-main button[class*="bg-indigo-600"]:hover,
+.ledger-main a[class*="bg-indigo-600"]:hover {
+    background-color: var(--ledger-info-hover) !important;
+    border-color: var(--ledger-info-hover) !important;
+}
+
+.ledger-main button[class*="bg-slate-800"],
+.ledger-main a[class*="bg-slate-800"],
+.ledger-main button[class*="bg-slate-900"],
+.ledger-main a[class*="bg-slate-900"] {
+    background-color: var(--ledger-navigation) !important;
+    border-color: var(--ledger-navigation) !important;
+    color: #fff !important;
+}
+
+.ledger-main button[class*="bg-slate-800"]:hover,
+.ledger-main a[class*="bg-slate-800"]:hover,
+.ledger-main button[class*="bg-slate-900"]:hover,
+.ledger-main a[class*="bg-slate-900"]:hover {
+    background-color: #1e293b !important;
+    border-color: #1e293b !important;
+}
+
+.ledger-main button[class*="bg-rose-"],
+.ledger-main a[class*="bg-rose-"],
+.ledger-main button[class*="text-rose-"] {
+    border-color: var(--ledger-danger-border) !important;
+}
+
+.ledger-main button[class*="bg-rose-"]:hover,
+.ledger-main a[class*="bg-rose-"]:hover {
+    background-color: var(--ledger-danger-soft) !important;
+}
+
+.ledger-main button[class*="bg-amber-"],
+.ledger-main a[class*="bg-amber-"] {
+    border-color: var(--ledger-warning-border) !important;
+}
+
+.ledger-main button[class*="bg-slate-100"],
+.ledger-main a[class*="bg-slate-100"],
+.ledger-main button[class*="bg-slate-200"],
+.ledger-main a[class*="bg-slate-200"] {
+    border: 1px solid var(--ledger-border-strong) !important;
+    color: var(--ledger-text) !important;
+}
+
+.ledger-main button[class*="bg-slate-100"]:hover,
+.ledger-main a[class*="bg-slate-100"]:hover,
+.ledger-main button[class*="bg-slate-200"]:hover,
+.ledger-main a[class*="bg-slate-200"]:hover {
+    background-color: #e2e8f0 !important;
+}
+
+.ledger-main input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.ledger-main select,
+.ledger-main textarea,
+.auth-shell input:not([type="checkbox"]):not([type="radio"]),
+.auth-shell select,
+.auth-shell textarea {
+    min-height: var(--ledger-control-height);
+    border-radius: var(--ledger-control-radius) !important;
+    border-color: var(--ledger-border-strong) !important;
+    transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+.ledger-main input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
+.ledger-main select:focus,
+.ledger-main textarea:focus,
+.auth-shell input:not([type="checkbox"]):not([type="radio"]):focus,
+.auth-shell select:focus,
+.auth-shell textarea:focus {
+    border-color: var(--ledger-primary) !important;
+    box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.12) !important;
+}
+
+.ledger-main [class*="bg-emerald-50"],
+.ledger-main [class*="bg-emerald-100"] {
+    border-color: var(--ledger-success-border) !important;
+}
+
+.ledger-main [class*="bg-amber-50"],
+.ledger-main [class*="bg-amber-100"] {
+    border-color: var(--ledger-warning-border) !important;
+}
+
+.ledger-main [class*="bg-rose-50"],
+.ledger-main [class*="bg-rose-100"] {
+    border-color: var(--ledger-danger-border) !important;
+}
+
+.ledger-main [class*="bg-indigo-50"],
+.ledger-main [class*="bg-indigo-100"] {
+    border-color: var(--ledger-info-border) !important;
+}
+
+.ledger-main table button,
+.ledger-main table a[class*="bg-"] {
+    min-height: 36px;
+    height: 36px;
+    padding-inline: 10px !important;
+    font-size: 12px !important;
+}
+
+.ledger-main table button + button,
+.ledger-main table form + form {
+    margin-inline-start: 4px;
+}
+
+.ledger-main table .rounded-full,
+.ledger-main .ledger-status,
+.ledger-main [class*="rounded-full"][class*="bg-"] {
+    min-height: 24px;
+    line-height: 1.2;
+}
+
+.auth-shell button[type="submit"] {
+    min-height: 46px;
+    border-radius: var(--ledger-control-radius);
+    border: 1px solid var(--ledger-primary);
+    background-color: var(--ledger-primary);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.auth-shell button[type="submit"]:hover {
+    background-color: var(--ledger-primary-hover);
+    border-color: var(--ledger-primary-hover);
+}
+
+.ledger-main form label {
+    letter-spacing: 0.01em;
+}
+
+.ledger-main form input::placeholder,
+.ledger-main form textarea::placeholder {
+    color: #94a3b8;
+}
+
+.ledger-main form input:disabled,
+.ledger-main form select:disabled,
+.ledger-main form textarea:disabled {
+    cursor: not-allowed;
+    background: #f1f5f9 !important;
+    color: #64748b;
+}
+
+.ledger-main button,
+.ledger-main a[class*="px-"],
+.ledger-main label[class*="cursor-pointer"] {
+    transform: translateZ(0);
+}
+
+.ledger-main button:active,
+.ledger-main a[class*="px-"]:active {
+    transform: translateY(1px);
+}
+
+.ledger-main .text-emerald-700,
+.ledger-main .text-emerald-800 {
+    text-wrap: balance;
+}
+
+.ledger-main [role="alert"],
+.ledger-main .ledger-alert-success,
+.ledger-main .ledger-alert-danger {
+    border-radius: 10px;
+}
+
+@media (max-width: 767px) {
+    .ledger-sidebar {
+        transform: translateX(100%) !important;
+    }
+
+    .ledger-sidebar.sidebar-open {
+        transform: translateX(0) !important;
+    }
+
+    .ledger-main {
+        padding-inline: 12px !important;
+    }
+
+    .ledger-main .ledger-panel-padding {
+        padding: 16px !important;
+    }
+
+    .ledger-main table th,
+    .ledger-main table td {
+        padding-inline: 12px !important;
+    }
+
+    .ledger-main table {
+        min-width: 680px;
+    }
+
+    .ledger-main form[class*="grid"],
+    .ledger-main div[class*="grid grid-cols-"] {
+        row-gap: 12px;
+    }
+
+    .ledger-main .overflow-x-auto {
+        margin-inline: -16px;
+        padding-inline: 16px;
+        width: calc(100% + 32px);
+    }
+}

@@ -6,11 +6,10 @@
 <div class="space-y-6">
 
     <!-- فحص الاستعلام المباشر برقم الصنف -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+    <div class="ledger-panel ledger-panel-padding">
         <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div>
-                <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">
-                    <span>🤖</span>
+                <h2 class="ledger-page-title">
                     <span>الرد الآلي عبر الواتساب (الاستعلام برقم الصنف)</span>
                 </h2>
                 <p class="text-sm text-slate-500 mt-1">
@@ -50,7 +49,7 @@
 
     <!-- نتائج الفحص التجريبي برقم الصنف -->
     @if($customerMessage)
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+        <div class="ledger-panel ledger-panel-padding space-y-4">
             <h3 class="font-bold text-slate-800">نتيجة البحث برقم الصنف:</h3>
 
             @forelse($matchedItems as $item)
@@ -119,7 +118,7 @@
     </div>
 
     <!-- إعدادات الواتساب والردود -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+    <div class="ledger-panel ledger-panel-padding">
         <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-5 border-b border-slate-100 pb-4">
             <div>
                 <h3 class="font-bold text-slate-800">إعدادات الاتصال وقوالب الرد الآلي</h3>
@@ -213,7 +212,7 @@
     <!-- قسم الاستثناء وسجل الاستعلامات -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         <!-- الأرقام المستثناة -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+        <div class="ledger-panel ledger-panel-padding space-y-4">
             <div>
                 <h3 class="font-bold text-slate-800">⭐ الأرقام المستثناة (استعلام دائم)</h3>
                 <p class="text-xs text-slate-500 mt-0.5">أرقام مميزة لا ينطبق عليها الحد الأقصى للاستعلامات.</p>
@@ -228,8 +227,8 @@
                 </button>
             </form>
 
-            <div class="overflow-x-auto">
-                <table class="w-full text-sm text-right border-collapse">
+            <div class="ledger-table-wrap">
+                <table class="ledger-table">
                     <thead>
                         <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 text-xs">
                             <th class="p-2.5">الرقم</th>
@@ -261,7 +260,7 @@
         </div>
 
         <!-- سجل استهلاك الاستعلامات -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+        <div class="ledger-panel ledger-panel-padding space-y-4">
             <div class="flex items-center justify-between">
                 <div>
                     <h3 class="font-bold text-slate-800">📊 استهلاك استعلامات العملاء</h3>
@@ -276,8 +275,8 @@
                 </form>
             </div>
 
-            <div class="overflow-x-auto">
-                <table class="w-full text-sm text-right border-collapse">
+            <div class="ledger-table-wrap">
+                <table class="ledger-table">
                     <thead>
                         <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 text-xs">
                             <th class="p-2.5">رقم العميل</th>

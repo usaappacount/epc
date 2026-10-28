@@ -25,7 +25,7 @@
                     <button
                         type="button"
                         onclick="openEditModal({{ $item->id }}, {{ Js::from($item->item_number) }}, {{ Js::from($item->item_name) }}, {{ $item->quantity }}, {{ (float) $item->price }})"
-                        class="text-blue-600 hover:text-blue-800 font-semibold">
+                        class="ledger-button-secondary">
                         تعديل
                     </button>
 
@@ -35,7 +35,7 @@
                         @csrf
                         @method('DELETE')
 
-                        <button type="submit" class="text-rose-600 hover:text-rose-800 font-semibold">
+                        <button type="submit" class="ledger-button-danger">
                             حذف
                         </button>
                     </form>

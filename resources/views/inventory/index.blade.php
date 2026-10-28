@@ -5,9 +5,9 @@
 @section('content')
 <div class="space-y-6">
 
-    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+    <div class="ledger-panel ledger-panel-padding flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-            <h2 class="text-2xl font-bold text-slate-800">
+            <h2 class="ledger-page-title">
                 المخزون 
                 @if(isset($viewingClient))
                     <span class="text-base text-emerald-600 font-semibold">(مخزون العميل: {{ $viewingClient->name }})</span>
@@ -28,14 +28,14 @@
             <div class="relative">
                 <input type="text" id="live-search" value="{{ request('search') }}"
                        placeholder="ابحث برقم أو اسم الصنف تلقائيًا..."
-                       class="w-72 border border-slate-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500">
+                       class="ledger-input w-full md:w-72" dir="rtl">
             </div>
 
             @if(!isset($viewingClient))
                 <!-- زر الاسترجاع الفوري بضغطة زر (One-Click Rollback) يظهر تلقائياً عند توفر نقطة استرجاع -->
                 <button type="button" id="top-rollback-btn"
                         onclick="handleOneClickRollback()"
-                        class="hidden bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 px-3.5 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-1.5"
+                        class="ledger-button hidden border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
                         title="التراجع الفوري عن آخر عملية استيراد واستعادة المخزون السابق">
                     <span>↩️</span>
                     <span>تراجع عن آخر استيراد</span>
@@ -43,7 +43,7 @@
 
                 <button type="button"
                         onclick="openSmartExcelModal()"
-                        class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-1.5 shadow-sm">
+                        class="ledger-button bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">
                     <span>📥</span>
                     <span>استيراد من Excel</span>
                 </button>
@@ -80,33 +80,33 @@
 
     <!-- نموذج إضافة صنف جديد -->
     @if(auth()->user()->role === 'admin' || !isset($viewingClient))
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+    <div class="ledger-panel ledger-panel-padding">
         <h3 class="text-base font-bold text-slate-700 mb-4">إضافة صنف جديد</h3>
 
         <form method="POST" action="{{ route('inventory.store') }}" class="grid grid-cols-1 md:grid-cols-5 gap-4">
             @csrf
             <input type="text" name="item_number" value="{{ old('item_number') }}" placeholder="رقم الصنف" required
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm uppercase">
+                   class="ledger-input font-mono">
 
             <input type="text" name="item_name" value="{{ old('item_name') }}" placeholder="اسم الصنف / الترجمة" required
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                   class="ledger-input">
 
             <input type="number" name="quantity" value="{{ old('quantity') }}" placeholder="الكمية" min="0" required
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                   class="ledger-input">
 
             <input type="number" step="0.01" name="price" value="{{ old('price') }}" placeholder="السعر" min="0" required
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                   class="ledger-input">
 
-            <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 px-4 rounded-lg text-sm transition">
+            <button type="submit" class="ledger-button-primary">
                 + حفظ الصنف
             </button>
         </form>
     </div>
     @endif
 
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div class="overflow-x-auto">
-            <table class="w-full text-right border-collapse">
+    <div class="ledger-panel overflow-hidden">
+        <div class="ledger-table-wrap">
+            <table class="ledger-table">
                 <thead>
                     <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 text-sm">
                         <th class="py-4 px-6 font-bold">رقم الصنف </th>

@@ -6,12 +6,11 @@
 <div class="space-y-6">
 
     <!-- كرت رأس الصفحة والبحث -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+    <div class="ledger-panel ledger-panel-padding space-y-4">
         <div class="flex flex-wrap justify-between items-center gap-4">
             <div>
-                <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">
-                    <span>🌐</span>
-                    <span>المخزون المشترك</span>
+                <h2 class="ledger-page-title">
+                        <span>المخزون المشترك</span>
                 </h2>
                 <p class="text-sm text-slate-500 mt-1">
                     أصناف مدمجة لجميع العملاء بدون تكرار. اضغط على <strong>رقم الصنف</strong> لاستعراض التفاصيل والكلمات المفتاحية.
@@ -45,14 +44,14 @@
     </div>
 
     <!-- جدول الأصناف المشتركة -->
-    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+    <div class="ledger-panel ledger-panel-padding space-y-4">
         <div class="flex justify-between items-center text-xs text-slate-500 font-semibold border-b border-slate-100 pb-3">
             <span>إجمالي الأصناف: <strong class="text-slate-800">{{ $masterItems->total() }}</strong> صنف</span>
             <span>صفحة {{ $masterItems->currentPage() }} من {{ $masterItems->lastPage() }}</span>
         </div>
 
-        <div class="overflow-x-auto">
-            <table class="w-full text-right border-collapse text-sm">
+        <div class="ledger-table-wrap">
+            <table class="ledger-table">
                 <thead>
                     <tr class="bg-slate-50 border-b border-slate-200 text-slate-600">
                         <th class="py-3 px-4 font-semibold">رقم الصنف</th>

@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-29T00:46:43+03:00",
+  "title": "Design System: Smart Inventory System",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Operational Emerald", "canonical": "#059669", "tonalRamp": ["#064e3b", "#065f46", "#047857", "#059669", "#10b981", "#34d399", "#6ee7b7", "#a7f3d0"] },
+      "primary-hover": { "role": "primary", "displayName": "Operational Emerald Deep", "canonical": "#047857", "tonalRamp": ["#064e3b", "#065f46", "#047857", "#059669", "#10b981", "#34d399", "#6ee7b7", "#a7f3d0"] },
+      "navigation-dark": { "role": "neutral", "displayName": "Deep Navigation Slate", "canonical": "#0f172a", "tonalRamp": ["#020617", "#0f172a", "#1e293b", "#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1"] },
+      "neutral-bg": { "role": "neutral", "displayName": "Workspace Neutral", "canonical": "#f1f5f9", "tonalRamp": ["#0f172a", "#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1", "#e2e8f0", "#f8fafc"] },
+      "surface": { "role": "neutral", "displayName": "Clean Surface", "canonical": "#ffffff", "tonalRamp": ["#0f172a", "#475569", "#64748b", "#94a3b8", "#cbd5e1", "#e2e8f0", "#f8fafc", "#ffffff"] },
+      "text-strong": { "role": "neutral", "displayName": "Strong Text", "canonical": "#1e293b", "tonalRamp": ["#020617", "#0f172a", "#1e293b", "#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1"] },
+      "text-muted": { "role": "neutral", "displayName": "Muted Text", "canonical": "#64748b", "tonalRamp": ["#0f172a", "#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1", "#e2e8f0", "#f8fafc"] },
+      "border": { "role": "neutral", "displayName": "Quiet Border", "canonical": "#e2e8f0", "tonalRamp": ["#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1", "#e2e8f0", "#f1f5f9", "#f8fafc"] },
+      "info": { "role": "secondary", "displayName": "Import Indigo", "canonical": "#4f46e5", "tonalRamp": ["#312e81", "#3730a3", "#4338ca", "#4f46e5", "#6366f1", "#818cf8", "#a5b4fc", "#c7d2fe"] },
+      "warning": { "role": "semantic", "displayName": "Warning Amber Surface", "canonical": "#fef3c7", "tonalRamp": ["#78350f", "#92400e", "#b45309", "#d97706", "#f59e0b", "#fbbf24", "#fde68a", "#fffbeb"] },
+      "warning-text": { "role": "semantic", "displayName": "Amber Text", "canonical": "#92400e", "tonalRamp": ["#78350f", "#92400e", "#b45309", "#d97706", "#f59e0b", "#fbbf24", "#fde68a", "#fffbeb"] },
+      "success-bg": { "role": "semantic", "displayName": "Success Mint", "canonical": "#d1fae5", "tonalRamp": ["#064e3b", "#065f46", "#047857", "#059669", "#10b981", "#6ee7b7", "#a7f3d0", "#ecfdf5"] },
+      "success-text": { "role": "semantic", "displayName": "Success Text", "canonical": "#065f46", "tonalRamp": ["#064e3b", "#065f46", "#047857", "#059669", "#10b981", "#6ee7b7", "#a7f3d0", "#ecfdf5"] },
+      "danger": { "role": "semantic", "displayName": "Danger Rose", "canonical": "#e11d48", "tonalRamp": ["#881337", "#9f1239", "#be123c", "#e11d48", "#f43f5e", "#fb7185", "#fda4af", "#ffe4e6"] }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Operational Body", "purpose": "Forms, tables, descriptions, and working content." },
+      "title": { "displayName": "Page Title", "purpose": "Page titles and principal section headings." },
+      "label": { "displayName": "Compact Label", "purpose": "Field labels, metadata, badges, and table headings." }
+    },
+    "shadows": [
+      { "name": "panel-lift", "value": "0 1px 2px rgba(15, 23, 42, 0.05)", "purpose": "Card and panel surfaces." },
+      { "name": "floating-widget", "value": "0 25px 50px -12px rgba(15, 23, 42, 0.25)", "purpose": "Persistent widgets and modal-like overlays." }
+    ],
+    "motion": [
+      { "name": "state-transition", "value": "150ms ease-in-out", "purpose": "Hover, focus, navigation, progress, and short state feedback." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Affirmative inventory action with restrained emerald emphasis.",
+      "html": "<button class=\"ds-btn-primary\">حفظ الصنف</button>",
+      "css": ".ds-btn-primary { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:0; border-radius:8px; background:#059669; color:#ffffff; padding:8px 16px; font:600 14px/1.25 Cairo, sans-serif; cursor:pointer; transition:background 150ms ease-in-out, box-shadow 150ms ease-in-out; }.ds-btn-primary:hover { background:#047857; }.ds-btn-primary:focus-visible { outline:2px solid #6366f1; outline-offset:2px; }.ds-btn-primary:active { background:#065f46; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input-default",
+      "description": "Default inventory form field with a quiet slate border and clear focus state.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">اسم الصنف</span><input class=\"ds-input\" type=\"text\" placeholder=\"اكتب اسم الصنف\"></label>",
+      "css": ".ds-field { display:grid; gap:6px; color:#1e293b; font:600 12px/1.25 Cairo, sans-serif; direction:rtl; }.ds-input { width:100%; min-height:40px; border:1px solid #cbd5e1; border-radius:8px; background:#ffffff; color:#1e293b; padding:8px 12px; font:400 14px/1.5 Cairo, sans-serif; transition:border-color 150ms ease-in-out, box-shadow 150ms ease-in-out; }.ds-input::placeholder { color:#64748b; }.ds-input:focus { border-color:#059669; outline:none; box-shadow:0 0 0 2px rgba(5,150,105,0.18); }"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip-success",
+      "description": "Compact success status badge for active or completed records.",
+      "html": "<span class=\"ds-chip-success\">نشط</span>",
+      "css": ".ds-chip-success { display:inline-flex; align-items:center; border-radius:9999px; border:1px solid transparent; background:#d1fae5; color:#065f46; padding:2px 10px; font:700 12px/1.25 Cairo, sans-serif; }"
+    },
+    {
+      "name": "Dashboard Navigation",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "Right-aligned sidebar navigation with an emerald active destination.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-link ds-nav-active\" href=\"#\">المخزون</a><a class=\"ds-nav-link\" href=\"#\">بوت الواتساب</a></nav>",
+      "css": ".ds-nav { width:220px; display:grid; gap:8px; direction:rtl; background:#0f172a; padding:16px; }.ds-nav-link { display:flex; align-items:center; min-height:44px; border-radius:8px; color:#cbd5e1; padding:12px 16px; font:600 14px/1.25 Cairo, sans-serif; text-decoration:none; transition:background 150ms ease-in-out, color 150ms ease-in-out; }.ds-nav-link:hover { background:#1e293b; color:#ffffff; }.ds-nav-link:focus-visible { outline:2px solid #6366f1; outline-offset:2px; }.ds-nav-active { background:#059669; color:#ffffff; }"
+    },
+    {
+      "name": "Panel Card",
+      "kind": "card",
+      "refersTo": "panel-card",
+      "description": "Light operational panel with quiet border and subtle panel lift.",
+      "html": "<section class=\"ds-panel\"><h2 class=\"ds-panel-title\">قائمة المخزون</h2><p class=\"ds-panel-copy\">الأصناف والكمية والحالة الحالية.</p></section>",
+      "css": ".ds-panel { direction:rtl; border:1px solid #e2e8f0; border-radius:12px; background:#ffffff; box-shadow:0 1px 2px rgba(15,23,42,0.05); padding:24px; }.ds-panel-title { margin:0 0 8px; color:#1e293b; font:700 20px/1.3 Cairo, sans-serif; }.ds-panel-copy { margin:0; color:#64748b; font:400 14px/1.5 Cairo, sans-serif; }"
+    },
+    {
+      "name": "Import Progress",
+      "kind": "custom",
+      "refersTo": "import-progress",
+      "description": "Indigo import progress pattern used for background Excel workflows.",
+      "html": "<section class=\"ds-import\"><div class=\"ds-import-head\"><strong>جاري استيراد ملف الإكسل...</strong><span>60%</span></div><div class=\"ds-import-track\"><div class=\"ds-import-bar\"></div></div></section>",
+      "css": ".ds-import { direction:rtl; border:1px solid #c7d2fe; border-radius:12px; background:#eef2ff; padding:16px; font:600 14px/1.25 Cairo, sans-serif; }.ds-import-head { display:flex; align-items:center; justify-content:space-between; color:#312e81; margin-bottom:8px; }.ds-import-track { height:12px; overflow:hidden; border-radius:9999px; background:#e0e7ff; }.ds-import-bar { width:60%; height:100%; border-radius:9999px; background:#4f46e5; transition:width 150ms ease-in-out; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operational Ledger",
+    "overview": "The incumbent interface is a practical Arabic RTL operations workspace. It favors readable data, familiar controls, and low-friction task completion over visual spectacle. Surfaces are light, borders are quiet, navigation is persistent, and status is communicated with restrained semantic color.\n\nThe character is refined and restrained: compact enough for daily work, but with clear spacing and a consistent component vocabulary.",
+    "keyCharacteristics": ["Arabic-first right-to-left structure", "Clean light surfaces on a cool slate-neutral page", "Emerald actions and selection with indigo reserved for import tools", "Consistent rounded panels, inputs, tables, and buttons", "Desktop task density with responsive collapse rather than fluid typography"],
+    "rules": [
+      { "name": "The Accent Rarity Rule", "body": "Emerald leads actions and current location; indigo is reserved for import tools, and neutral surfaces remain visually dominant.", "section": "colors" },
+      { "name": "The One Voice Rule", "body": "Do not introduce display or script faces into inventory UI; headings, controls, labels, and data stay in the product’s established sans-serif family.", "section": "typography" },
+      { "name": "The Flat-by-Default Rule", "body": "Borders define normal surfaces; shadows appear only when a panel must visually lift or an overlay must escape the page.", "section": "elevation" }
+    ],
+    "dos": ["Preserve the Arabic RTL structure and existing terminology.", "Use direct, concise Arabic action labels beside familiar inventory concepts.", "Keep tables and data values easy to scan with consistent alignment and semantic status color.", "Use emerald for primary affirmative actions and current inventory navigation.", "Use slate borders and tonal surfaces before introducing shadow.", "Preserve keyboard focus, error recovery, loading feedback, and mobile overflow behavior."],
+    "donts": ["Introduce an unrequested visual world, hero treatment, or marketing-style layout.", "Mix emoji, ornamental icons, and line-icon systems; use the existing controls and symbols consistently.", "Replace familiar forms and table affordances with decorative cards or custom widgets.", "Use a display font, oversized heading, gradient text, or saturated inactive state.", "Color every section with a different accent; reserve indigo and semantic colors for their workflows.", "Delete or weaken established permission, validation, and data-integrity behavior during visual refinement."]
+  }
+}
