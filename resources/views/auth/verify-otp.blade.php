@@ -40,7 +40,7 @@
                 </button>
             </div>
             
-            <div class="mt-4" style="text-align: center; margin-top: 1rem;">
+            <div class="mt-4 text-center">
                 <a href="{{ route('login') }}" class="text-xs text-slate-500 underline">
                     العودة لتسجيل الدخول
                 </a>

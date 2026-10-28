@@ -17,24 +17,22 @@
                 </span>
                 <span class="text-lg font-bold">نظام المخزون الذكي</span>
             </div>
-            <div>
-                <h1 class="max-w-xl text-4xl font-bold leading-tight">كل حركة مخزون، أمامك بوضوح.</h1>
-                <p class="mt-4 max-w-lg text-base leading-7 text-slate-300">ابحث، حدّث، استورد، وتابع عملاءك من مساحة عمل واحدة مصممة للمهام اليومية السريعة.</p>
-            </div>
             <p class="text-xs text-slate-400">Inventory operations · Arabic RTL</p>
         </aside>
-        <main class="flex items-center justify-center">
-    <div class="auth-card space-y-6">
-        <div class="text-center">
-            <div class="flex justify-center mb-3">
-                <div class="w-12 h-12 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-700 shadow-sm">
-                    <svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <main class="auth-center">
+    <div class="auth-card space-y-5">
+        <div class="auth-card-header text-center">
+            <div class="flex justify-center mb-4">
+                <div class="auth-logo-mark">
+                    <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
                     </svg>
                 </div>
             </div>
-            <h1 class="text-xl font-bold text-slate-800">تسجيل الدخول</h1>
-            <p class="mt-1 text-sm text-slate-500">ادخل حسابك للمتابعة إلى نظام المخزون.</p>
+            <p class="auth-product-name">نظام المخزون الذكي</p>
+            <h1 class="auth-page-title">كل حركة مخزون، أمامك بوضوح.</h1>
+            <p class="auth-page-description">ابحث وحدّث الأصناف وتابع العملاء والاستيراد من مساحة عمل واحدة مصممة للمهام اليومية.</p>
+            <h2 class="auth-form-title">تسجيل الدخول</h2>
         </div>
 
         @if(session('error'))
@@ -77,7 +75,7 @@
             </div>
 
             <button type="submit" id="submitBtn"
-                class="ledger-button-dark w-full !min-h-12">
+                class="ledger-button-primary w-full !min-h-12">
                 {{ session('success') ? 'تأكيد ودخول' : 'تسجيل الدخول' }}
             </button>
         </form>
@@ -122,7 +120,7 @@
                 passwordLabel.textContent = 'كلمة المرور';
                 passwordInput.placeholder = 'أدخل كلمة المرور';
                 submitBtn.textContent = 'تسجيل الدخول';
-                submitBtn.className = 'ledger-button-dark w-full !min-h-12';
+                submitBtn.className = 'ledger-button-primary w-full !min-h-12';
                 whatsappHint.style.display = 'none';
             }
         }

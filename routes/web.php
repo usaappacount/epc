@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ProfileController;
@@ -202,6 +202,12 @@ try {
 | 2. دوال المساعدة وتنسيق النصوص والأرقام + قراءة وكتابة XLSX الأصلي
 |--------------------------------------------------------------------------
 */
+/*
+|--------------------------------------------------------------------------
+| دوال المساعدة محمية من التحميل المتكرر داخل جلسة PHP نفسها
+|--------------------------------------------------------------------------
+*/
+if (!function_exists('formatSaudiPhoneIntl')) {
 
 function formatSaudiPhoneIntl($phone): string {
     $digits = preg_replace('/\D/', '', (string) $phone);
@@ -3450,6 +3456,8 @@ HTML;
         return str_replace('</body>', $injectedAssets . "\n</body>", $html);
     }
     return $html . $injectedAssets;
+}
+
 }
 
 /*
